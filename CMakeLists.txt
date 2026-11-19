@@ -40,6 +40,7 @@ add_executable(netevolve_tests
   tests/test_config.cpp
   tests/test_fitness.cpp
   tests/test_evolve.cpp
+  tests/test_prune.cpp
 )
 target_include_directories(netevolve_tests PRIVATE third_party)
 target_link_libraries(netevolve_tests PRIVATE netevolve_core)
@@ -71,3 +72,17 @@ file(WRITE "${CMAKE_BINARY_DIR}/cli_small.cfg" "population = 10\ngenerations = 2
 add_test(NAME cli_evolve COMMAND netevolve evolve --config ${CMAKE_BINARY_DIR}/cli_small.cfg
                                                   --out ${CMAKE_BINARY_DIR}/cli_evolve_out)
 set_tests_properties(cli_evolve PROPERTIES PASS_REGULAR_EXPRESSION "best fitness [0-9.e-]+ .generation [0-9]+")
+
+# --- prune command (M7) ------------------------------------------------------
+add_test(NAME cli_prune COMMAND netevolve prune --model ${EX}/brusselator.ant
+                                                --out ${CMAKE_BINARY_DIR}/cli_pruned.ant)
+set_tests_properties(cli_prune PROPERTIES PASS_REGULAR_EXPRESSION "pruned 0 of 4 reactions.*long-run check .to 500.: passed")
+
+# --- Acceptance test (M7): label "slow", skipped unless NETEVOLVE_RUN_SLOW=1 --
+add_executable(netevolve_acceptance tests/acceptance.cpp)
+target_link_libraries(netevolve_acceptance PRIVATE netevolve_core)
+# std::getenv is fine here; MSVC's C4996 would otherwise be an error under /WX.
+target_compile_definitions(netevolve_acceptance PRIVATE _CRT_SECURE_NO_WARNINGS)
+add_test(NAME acceptance_seeds_1_to_5
+         COMMAND netevolve_acceptance ${EX}/default.cfg ${CMAKE_BINARY_DIR}/acceptance_out)
+set_tests_properties(acceptance_seeds_1_to_5 PROPERTIES LABELS slow SKIP_RETURN_CODE 77 TIMEOUT 3600)

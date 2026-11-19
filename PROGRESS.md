@@ -2,9 +2,76 @@
 
 ## Current milestone
 
-**M6 (parallel evaluation and performance) is complete.** It's waiting for the human's approval before M7 starts.
+**M7 (end-to-end oscillator evolution and validation) is complete. All milestones M0–M7 are done.** One step remains for the human: loading the results into Tellurium manually (SPEC M7). See "Manual Tellurium step" below.
 
 Remote: https://github.com/zyrrron/netevolve (private), branch `main`.
+
+## M7: End-to-end oscillator evolution and validation
+
+Done:
+- **`prune`** (`src/evolve.cpp`, CLI `prune --model F [--config F] [--out F]`):
+  - Tries removing each reaction in order and keeps a removal if the fitness stays ≥ 0.95 × the *original* network's fitness. It repeats full passes until nothing more can be removed, and never goes below `r_min`.
+  - Writes the pruned model with a header comment and reports how many reactions were removed, the fitness before and after, and the long-run check.
+- **Long-run check** (`long_run_check` in `src/fitness.cpp`):
+  - Re-simulates to 5 × t_end with the same sample spacing.
+  - Measures the amplitude of the best-scoring species as the mean |peak − trough| of the filtered extrema (`window_amplitude`, same threshold as the fitness). It uses two windows of length (1 − transient_fraction) × t_end: one ending at t_end, one ending at 5 × t_end.
+  - Passes if both amplitudes are > 0 and differ by at most 10%.
+  - The step budget and wall-clock limit scale with the simulated time (× 5).
+  - `evolve` and `prune` both print the result.
+- **Acceptance test** (`tests/acceptance.cpp`, executable `netevolve_acceptance`, CTest `acceptance_seeds_1_to_5`, label `slow`):
+  - Skipped (exit code 77, CTest "Skipped") unless `NETEVOLVE_RUN_SLOW=1`, so it isn't part of the default run.
+  - Runs the default config for seeds 1–5, prunes each best network, runs the long-run check, writes `build/acceptance_out/seedN/` (including `pruned.ant`) and prints a table.
+
+Tests (Release): **9/9 CTest tests passed in the default run, with the acceptance test reported as Skipped. Doctest: 67/67 cases and 1,575,605 assertions passed.**
+- **Prune:**
+  - Removes exactly the two padding reactions (negligible k) from a 6-reaction Brusselator, leaving the 4 core reactions in order.
+  - Removes nothing from the minimal Brusselator.
+  - Respects `r_min` (1, 3 and 4 tested).
+  - With a toy fitness, the 0.95 threshold is relative to the original network's fitness: k values 50, 46, 3, 1 → removes the 3 and the 1, keeping 0.96.
+- **Long-run check:**
+  - Brusselator passes (−0.04%).
+  - **A slowly damped Brusselator** (B = 1.999, just past the Hopf point, starting near the fixed point) **has fitness 0.972 but fails the long-run check (−24.8%)**. This is exactly the slow damping the check exists to catch.
+  - The stable focus and a blow-up network both fail.
+- **`window_amplitude`:** measures 4.0 for 5 + 2 sin.
+- **CLI (CTest):** `prune` on the Brusselator removes 0 of 4 reactions and passes the long-run check.
+
+### Acceptance test result (recorded 2026-11-18)
+
+`NETEVOLVE_RUN_SLOW=1 ctest -C Release -L slow`, default config, 8 threads, 12 s in total: **PASSED, 3 of 5 runs** (3 needed).
+
+| seed | best fitness | at generation | evaluations | pruned fitness | reactions | long-run amplitude (best species) | result |
+|---|---|---|---|---|---|---|---|
+| 1 | 1.0000 | 72 | 13,160 | 1.0000 | 7 → 5 | 1.574 → 0 (−100%) | FAIL (long-run) |
+| 2 | 1.0000 | 112 | 20,360 | 1.0000 | 7 → 6 | 0.4819 → 0.3811 (−20.9%) | FAIL (long-run) |
+| 3 | 1.0000 | 58 | 10,640 | 1.0000 | 7 → 7 | 491.7 → 484.7 (−1.4%) | PASS |
+| 4 | 1.0000 | 93 | 16,940 | 1.0000 | 9 → 9 | 104.4 → 104.4 (−0.0%) | PASS |
+| 5 | 0.9943 | 30 | 5,600 | 0.9974 | 11 → 7 | 0.1541 → 0.1540 (−0.1%) | PASS |
+
+Every run reached fitness ≥ 0.95, within 30–112 generations; runs stop at `target_fitness = 0.99`. What each long-run result means:
+- **Seed 1, correctly rejected.** S0 and S2 grow without bound (S2 is about 297 at t = 500 and still rising). The growing S2 damps the oscillating species through S1 + S2 → S2, so the oscillation is a transient, not sustained.
+- **Seed 2, a real limit cycle rejected by the check as specified.** At t = 100 the trajectory is still settling onto the cycle from above: S1's peak goes 1.3 → 0.96 → 0.945, then stays constant from t ≈ 200 to 500. The check compares the t = 50–100 window with the last window, which gives −21%. This is a false negative caused by t_end being short relative to the convergence time. Neither the check nor the threshold was changed.
+- **Seeds 3, 4 and 5, sustained oscillators, confirmed independently:**
+  - **SciPy** `solve_ivp`, Radau and LSODA (rtol 1e-10, atol 1e-13), on equations built directly from `pruned.ant`, gives the same value ranges as NetEvolve in every window from t = 50 to 500, and constant amplitude from t ≈ 200.
+  - **Tellurium 2.2.13.1** (libRoadRunner, CVODE) with the spec's call `te.loada(...).simulate(0, 500, 5000)` shows sustained oscillation for seeds 3 and 4, with the same amplitude at t = 450–500 as at t = 50–100. For seed 5, CVODE stops with `CV_TOO_MUCH_WORK` at t ≈ 242 with default settings, and still stops even with `maximum_num_steps = 1e6`. With `absolute_tolerance = 1e-14` and `relative_tolerance = 1e-10` it completes and shows sustained oscillation. Those same tight settings make CVODE stall on seed 3 at t = 16.6 (step size about 1e-15), while seed 3 runs fine with the defaults. CVODE is fragile on these spiky relaxation oscillators, whose species dip to about 1e-6 on every cycle. NetEvolve and SciPy handle all of them.
+
+Defect found and fixed during the acceptance run: the long-run check first used the normal per-simulation step budget (50,000 steps) for a simulation five times as long. Seeds 3 and 4 hit it (seed 3 at t = 358) and failed with an amplitude of 0, although their oscillation is genuine. The budget and wall-clock limit now scale with the simulated duration. With that fix the result went from 1 of 5 to 3 of 5. No test or threshold was changed. The acceptance table now prints the simulation status when a long run fails, so this can't hide behind "0 → 0" again.
+
+**The margin is thin: exactly 3 of 5.** If you want more headroom without changing the test, the options are parameter changes, as SPEC M7 suggests:
+- a longer `t_end`, e.g. 200, so the fitness window starts after the approach to the limit cycle (this would likely turn seed 2 into a pass);
+- a `target_fitness` closer to 1, so runs don't stop at the first network scoring 0.99;
+- adding the long-run check to the selection itself, instead of only checking afterwards.
+
+None of these is applied.
+
+### Manual Tellurium step (for the human, SPEC M7)
+
+```python
+import tellurium as te
+r = te.loada(open(r'build/acceptance_out/seed3/best_final.ant').read())   # also seed4
+r.simulate(0, 500, 5000); r.plot()
+```
+
+For seed 5, set `r.integrator.absolute_tolerance = 1e-14` and `r.integrator.relative_tolerance = 1e-10` before `simulate`, or CVODE stops with `CV_TOO_MUCH_WORK`.
 
 ## M6: Parallel evaluation and performance
 
@@ -215,7 +282,16 @@ Tests (Release): **3/3 CTest tests passed. Doctest: 11/11 cases and 775,806 asse
 - **Threads:** the pool is created per generation instead of being kept alive, because that's simpler and the overhead is negligible.
 - **Wall-clock guard:** this is the only possible source of thread-count dependence. If heavy CPU load ever made a simulation exceed `max_wall_seconds` (10 s, against a typical 0.7 ms), its fitness would become 0. It hasn't happened in any run so far.
 
+### M7
+- **"Fitness stays ≥ 0.95 × the original":** the reference is the input network's fitness, fixed for the whole prune, not the fitness after earlier removals.
+- **Prune floor:** prune respects `r_min` from the config (default 3), so the pruned network is still valid by SPEC §1.1.
+- **Long-run amplitude:** the mean |peak − trough| over the filtered extrema in each window, for the species with the best fitness score. Plain max − min would depend on how the samples happen to fall on sharp spikes.
+- **Long-run windows:** both have the fitness window's length, (1 − transient_fraction) × t_end = 50, and end at t_end and at 5 × t_end.
+- **Acceptance pass rule:** a run passes if it reaches fitness ≥ 0.95 *and* its pruned network passes the long-run check. At least 3 of 5 such runs are needed.
+- **Excluding the acceptance test from the default run:** the test exits with code 77 (`SKIP_RETURN_CODE`) unless `NETEVOLVE_RUN_SLOW=1` is set, so a plain `ctest -C Release` reports it as skipped, not failed.
+
 ## Open issues
 
-- **M7 risk (reduced):** the fitness landscape is flat for random networks (see the M5 notes), but the full default run with seed 42 still reached fitness 1.0 by generation 140 (see M6). Seeds 1–5 will be tested in M7.
+- **Acceptance margin:** the test passes 3 of 5, exactly the threshold. Seed 2 is a genuine limit cycle that the spec's long-run check rejects because it's still settling at t_end = 100. Parameter options are listed in the M7 notes; none is applied.
+- **Tellurium/CVODE:** fragile on some evolved spiky oscillators; see M7 for the settings that work.
 

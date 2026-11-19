@@ -1,6 +1,7 @@
 // netevolve command-line entry point.
 #include <charconv>
 #include <chrono>
+#include <cstdio>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -66,6 +67,21 @@ void write_file(const std::string& path, const std::string& content) {
     if (!out) throw std::runtime_error("error writing '" + path + "'");
 }
 
+void print_long_run(std::ostream& os, const ne::Network& net, const ne::FitnessParams& fp) {
+    const ne::LongRunReport lr = ne::long_run_check(net, fp);
+    os << "long-run check (to " << 5 * fp.t_end << "): ";
+    if (lr.status != ne::SimStatus::Ok) {
+        os << "FAILED, simulation: " << ne::to_string(lr.status) << "\n";
+        return;
+    }
+    if (lr.species < 0 || lr.amp_ref <= 0) {
+        os << "FAILED, no oscillation at t_end\n";
+        return;
+    }
+    os << (lr.passed ? "passed" : "FAILED") << ", " << ne::species_name(net, lr.species) << " amplitude "
+       << lr.amp_ref << " -> " << lr.amp_last << " (" << 100 * lr.rel_change << "%)\n";
+}
+
 int cmd_simulate(int argc, char** argv) {
     const auto f = parse_flags(argc, argv, {"--model", "--t-end", "--points", "--csv"});
     const ne::Network net = ne::load_antimony_file(require_flag(f, "--model"));
@@ -127,6 +143,33 @@ int cmd_evolve(int argc, char** argv) {
               << res.best.reactions.size() << " reactions)\n";
     std::cout << res.n_evaluations << " evaluations in " << secs << " s ("
               << (secs > 0 ? res.n_evaluations / secs : 0.0) << " per second)\n";
+    print_long_run(std::cout, res.best, ne::fitness_params(cfg));
+    return 0;
+}
+
+int cmd_prune(int argc, char** argv) {
+    const auto f = parse_flags(argc, argv, {"--model", "--config", "--out"});
+    const ne::Network net = ne::load_antimony_file(require_flag(f, "--model"));
+    ne::Config cfg;
+    if (f.count("--config")) cfg = ne::load_config_file(f.at("--config"));
+    ne::validate_config(cfg);
+    const ne::FitnessParams fp = ne::fitness_params(cfg);
+
+    const ne::PruneResult pr =
+        ne::prune(net, [&](const ne::Network& n) { return ne::oscillation_fitness(n, fp); }, cfg.r_min);
+    char header[128];
+    std::snprintf(header, sizeof header, "netevolve: pruned, fitness %.6g (original %.6g)", pr.fitness,
+                  pr.original_fitness);
+    const std::string text = ne::write_antimony(pr.net, header);
+
+    // The model goes to stdout unless --out is given; the summary then goes to stderr.
+    const bool to_file = f.count("--out") > 0;
+    if (to_file) write_file(f.at("--out"), text);
+    else std::cout << text;
+    std::ostream& info = to_file ? std::cout : std::cerr;
+    info << "pruned " << pr.removed << " of " << net.reactions.size() << " reactions: fitness "
+         << pr.original_fitness << " -> " << pr.fitness << "\n";
+    print_long_run(info, pr.net, fp);
     return 0;
 }
 
@@ -150,10 +193,7 @@ int main(int argc, char** argv) {
         if (cmd == "simulate") return cmd_simulate(argc, argv);
         if (cmd == "fitness") return cmd_fitness(argc, argv);
         if (cmd == "evolve") return cmd_evolve(argc, argv);
-        if (cmd == "prune") {
-            std::cerr << "error: '" << cmd << "' is not implemented yet\n";
-            return 1;
-        }
+        if (cmd == "prune") return cmd_prune(argc, argv);
         throw UsageError("unknown command '" + std::string(cmd) + "'");
     } catch (const UsageError& e) {
         std::cerr << "error: " << e.what() << "\n";

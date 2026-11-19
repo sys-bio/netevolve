@@ -15,7 +15,7 @@ It's written in C++20 and uses only the standard library. Tests use [doctest](ht
 | M4 | Oscillation fitness; `simulate` and `fitness` commands | done |
 | M5 | Mutation and evolutionary loop; `evolve` command | done |
 | M6 | Parallel evaluation | done |
-| M7 | `prune`, long-run check, acceptance test | not started |
+| M7 | `prune`, long-run check, acceptance test | done |
 
 Details and test results for each milestone are in [PROGRESS.md](PROGRESS.md).
 
@@ -41,7 +41,6 @@ netevolve prune    --model FILE.ant [--config FILE] [--out FILE.ant]
 netevolve --version
 ```
 
-`prune` arrives in M7.
 
 ### Run an evolution
 
@@ -62,6 +61,22 @@ Flags override the config file. Progress is printed once per generation. The out
 A run stops after `generations` generations, or earlier once the best fitness reaches `target_fitness`. The same seed and config give byte-identical outputs, whatever the thread count.
 
 Fitness evaluation runs on `threads` threads (0 means all cores). On the development machine, an 8-thread laptop CPU, the default config evaluates about 1,450 networks per second on one thread and about 9,000 per second on 8, so a full 500-generation default run takes roughly 10–15 seconds.
+
+### Prune a network
+
+Evolved networks often contain reactions they don't need. `prune` tries removing each reaction in turn and keeps a removal if the fitness stays at least 0.95 × the original. It repeats this until no more reactions can be removed, and never goes below `r_min`.
+
+```bash
+netevolve prune --model runs/seed1/best_final.ant --config examples/default.cfg --out runs/seed1/pruned.ant
+```
+```
+pruned 2 of 8 reactions: fitness 1 -> 1
+long-run check (to 500): passed, S0 amplitude 138.195 -> 144.057 (4.24171%)
+```
+
+Without `--out`, the pruned model goes to stdout and the summary to stderr.
+
+**Long-run check.** This distinguishes sustained oscillation from slow damping, and both `prune` and `evolve` report it. The network is re-simulated to 5 × `t_end`. For its best-scoring species, the mean peak-to-trough amplitude in the last window must be within 10% of the amplitude in the window ending at `t_end`. Both windows have the fitness window's length.
 
 ### Simulate a model
 
@@ -138,20 +153,43 @@ Examples:
 - [examples/brusselator.ant](examples/brusselator.ant): the Brusselator with A = 1, B = 3. It has a limit cycle, and its fitness is about 1.
 - [examples/damped.ant](examples/damped.ant): the same network with B = 1.5. It has a stable focus, and its fitness is 0.
 
+## Tests
+
+```bash
+ctest --test-dir build -C Release --output-on-failure
+```
+
+This runs everything except the acceptance test, which has the label `slow` and is reported as skipped. The acceptance test runs five full evolutions (seeds 1–5, default config, about 15 s on 8 threads). It requires at least 3 of them to reach fitness ≥ 0.95, with the pruned result passing the long-run check. Run it with:
+
+```bash
+NETEVOLVE_RUN_SLOW=1 ctest --test-dir build -C Release -L slow -V
+```
+
+It keeps each run's output, plus `pruned.ant`, in `build/acceptance_out/seedN/`. (In PowerShell, set the variable with `$env:NETEVOLVE_RUN_SLOW = "1"` first.)
+
 ## Checking results in Tellurium
 
 ```python
 import tellurium as te
-r = te.loada(open('examples/brusselator.ant').read())
+r = te.loada(open('best_final.ant').read())
 r.simulate(0, 500, 5000)
 r.plot()
 ```
+
+Evolved oscillators are often spiky relaxation oscillators, with species dipping to about 1e-6 on every cycle. libRoadRunner's CVODE can stop on these with `CV_TOO_MUCH_WORK`. If that happens, tighten the tolerances before simulating:
+
+```python
+r.integrator.absolute_tolerance = 1e-14
+r.integrator.relative_tolerance = 1e-10
+```
+
+This fixed seed 5 of the acceptance run. Some networks behave the other way round: they run with the defaults and stall with tight tolerances. NetEvolve's own solver and SciPy's Radau/LSODA agreed on all of them (see PROGRESS.md, M7).
 
 ## Repository layout
 
 ```
 src/        main.cpp, network, model, integrator, fitness, evolve, config, rng.hpp
-tests/      doctest unit tests (test_*.cpp)
+tests/      doctest unit tests (test_*.cpp) and the acceptance test (acceptance.cpp)
 examples/   example models and the default config
 docs/       SPEC.md
 third_party/doctest/doctest.h

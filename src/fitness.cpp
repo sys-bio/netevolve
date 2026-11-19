@@ -106,4 +106,61 @@ double oscillation_fitness(const Network& net, const FitnessParams& p) {
     return evaluate_oscillation(net, p).fitness;
 }
 
+namespace {
+
+double amplitude_threshold(std::span<const double> w, const OscillationParams& p) {
+    double mean_abs = 0.0;
+    for (double v : w) mean_abs += std::abs(v);
+    mean_abs /= static_cast<double>(std::max<std::size_t>(w.size(), 1));
+    return std::max(p.min_rel_amplitude * mean_abs, p.min_abs_amplitude);
+}
+
+}  // namespace
+
+double window_amplitude(std::span<const double> w, const OscillationParams& p) {
+    const std::vector<Extremum> ext = find_extrema(w, amplitude_threshold(w, p));
+    if (ext.size() < 2) return 0.0;
+    double sum = 0.0;
+    for (std::size_t i = 1; i < ext.size(); ++i) sum += std::abs(ext[i].value - ext[i - 1].value);
+    return sum / static_cast<double>(ext.size() - 1);
+}
+
+LongRunReport long_run_check(const Network& net, const FitnessParams& p, double tolerance, double factor) {
+    LongRunReport rep;
+
+    // Species to check: the one with the best score over the normal run.
+    const FitnessReport fr = evaluate_oscillation(net, p);
+    rep.status = fr.status;
+    if (fr.status != SimStatus::Ok || fr.species.empty()) return rep;
+    rep.species = 0;
+    for (int s = 1; s < static_cast<int>(fr.species.size()); ++s)
+        if (fr.species[s].score > fr.species[rep.species].score) rep.species = s;
+
+    // Same sample spacing as the fitness simulation, `factor` times as long.
+    // The step budget and wall-clock limit are per simulation and sized for
+    // t_end, so they scale with the simulated time too.
+    const int intervals = static_cast<int>(std::lround(factor * (p.n_points - 1)));
+    const double t_long = p.t_end * intervals / (p.n_points - 1);
+    SolverOptions opts = p.solver;
+    opts.max_steps = static_cast<long>(std::ceil(factor * static_cast<double>(opts.max_steps)));
+    opts.max_wall_seconds *= factor;
+    const SimResult sim = simulate(make_model(net), net.init, t_long, intervals + 1, opts);
+    rep.status = sim.status;
+    if (!sim.ok()) return rep;
+
+    // Windows of (1 - transient_fraction) of the fitness run, in samples.
+    const int window = static_cast<int>(std::lround((1.0 - p.osc.transient_fraction) * (p.n_points - 1))) + 1;
+    auto window_ending_at = [&](int last_index) {
+        std::vector<double> w(window);
+        for (int i = 0; i < window; ++i) w[i] = sim.at(last_index - window + 1 + i, rep.species);
+        return w;
+    };
+    rep.amp_ref = window_amplitude(window_ending_at(p.n_points - 1), p.osc);
+    rep.amp_last = window_amplitude(window_ending_at(intervals), p.osc);
+    if (rep.amp_ref <= 0.0) return rep;
+    rep.rel_change = (rep.amp_last - rep.amp_ref) / rep.amp_ref;
+    rep.passed = rep.amp_last > 0.0 && std::abs(rep.rel_change) <= tolerance;
+    return rep;
+}
+
 }  // namespace ne

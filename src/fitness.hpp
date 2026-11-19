@@ -68,4 +68,30 @@ FitnessReport evaluate_oscillation(const Network& net, const FitnessParams& p);
 // Just the fitness value, in [0, 1].
 double oscillation_fitness(const Network& net, const FitnessParams& p);
 
+// --- Long-run check (SPEC M7) -----------------------------------------------
+//
+// Distinguishes sustained oscillation from slow damping. The network is
+// re-simulated to factor * t_end with the same sample spacing. For the
+// species with the best fitness score, the amplitude (mean peak-to-trough
+// difference of the filtered extrema) is measured in two windows of length
+// (1 - transient_fraction) * t_end: the fitness window ending at t_end, and
+// the window ending at factor * t_end. The check passes if both amplitudes
+// are positive and differ by at most `tolerance` relative to the first.
+
+struct LongRunReport {
+    bool passed = false;
+    SimStatus status = SimStatus::Ok;  // status of the long simulation
+    int species = -1;                  // species index checked
+    double amp_ref = 0.0;              // amplitude in the window ending at t_end
+    double amp_last = 0.0;             // amplitude in the last window
+    double rel_change = 0.0;           // (amp_last - amp_ref) / amp_ref
+};
+
+LongRunReport long_run_check(const Network& net, const FitnessParams& p, double tolerance = 0.10,
+                             double factor = 5.0);
+
+// Mean |peak - trough| over consecutive filtered extrema of `w`, using the
+// same threshold as signal_score. 0 if there is no complete pair.
+double window_amplitude(std::span<const double> w, const OscillationParams& p);
+
 }  // namespace ne

@@ -76,4 +76,19 @@ EvolutionResult run_evolve_command(const Config& cfg, std::ostream* log = nullpt
 // One log.csv data row, without the trailing newline.
 std::string log_row(const GenerationStats& s);
 
+// --- Pruning (SPEC M7) ------------------------------------------------------
+
+struct PruneResult {
+    Network net;                  // the pruned network
+    double original_fitness = 0;  // fitness of the input network
+    double fitness = 0;           // fitness of the pruned network
+    int removed = 0;              // reactions removed
+};
+
+// Removes each reaction in turn, keeping the removal if the fitness stays
+// >= keep_fraction * (fitness of the original network), and repeats full
+// passes until no reaction can be removed. Never goes below r_min reactions.
+// Deterministic: reactions are tried in order, first to last.
+PruneResult prune(const Network& net, const FitnessFn& fitness, int r_min, double keep_fraction = 0.95);
+
 }  // namespace ne

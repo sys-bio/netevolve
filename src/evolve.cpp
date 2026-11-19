@@ -249,6 +249,38 @@ EvolutionResult evolve(const Config& cfg, const FitnessFn& fitness, const Evolut
 }
 
 // ---------------------------------------------------------------------------
+// Pruning
+// ---------------------------------------------------------------------------
+
+PruneResult prune(const Network& net, const FitnessFn& fitness, int r_min, double keep_fraction) {
+    PruneResult res;
+    res.net = net;
+    res.original_fitness = fitness(net);
+    res.fitness = res.original_fitness;
+    const double required = keep_fraction * res.original_fitness;
+
+    bool removed_any = true;
+    while (removed_any) {
+        removed_any = false;
+        std::size_t i = 0;
+        while (i < res.net.reactions.size() && static_cast<int>(res.net.reactions.size()) > r_min) {
+            Network candidate = res.net;
+            candidate.reactions.erase(candidate.reactions.begin() + static_cast<long>(i));
+            const double f = fitness(candidate);
+            if (f >= required) {
+                res.net = std::move(candidate);
+                res.fitness = f;
+                ++res.removed;
+                removed_any = true;  // the next reaction has moved into slot i
+            } else {
+                ++i;
+            }
+        }
+    }
+    return res;
+}
+
+// ---------------------------------------------------------------------------
 // The `evolve` command
 // ---------------------------------------------------------------------------
 

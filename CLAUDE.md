@@ -30,7 +30,7 @@ From PowerShell, use `& "C:\Program Files\CMake\bin\cmake.exe" ...` with the sam
 - Compiler: MSVC from Visual Studio 2022 Community (v143).
 - The Visual Studio generator is multi-config, so always pass `--config` / `-C`.
 - Outputs go to `build/Release/netevolve.exe` and `build/Release/netevolve_tests.exe`.
-- Slow tests (M7) carry the CTest label `slow`. Exclude them with `-LE slow`.
+- The M7 acceptance test has the CTest label `slow`. It's skipped (exit code 77) unless `NETEVOLVE_RUN_SLOW=1` is set: `NETEVOLVE_RUN_SLOW=1 "/c/Program Files/CMake/bin/ctest.exe" --test-dir build -C Release -L slow -V`. It takes about 15 s on 8 threads.
 
 ## Layout
 
