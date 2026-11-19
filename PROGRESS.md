@@ -2,9 +2,30 @@
 
 ## Current milestone
 
-**M2 (ODE model and Jacobian) is complete.** It's waiting for the human's approval before M3 starts.
+**M3 (integrators) is complete.** It's waiting for the human's approval before M4 starts.
 
 Remote: https://github.com/zyrrron/netevolve (private), branch `main`.
+
+## M3: Integrators
+
+Done (`src/integrator.hpp/.cpp`):
+- **RK45:** Dormand–Prince 5(4), as in Hairer's DOPRI5. It uses FSAL, a weighted RMS error norm with `rtol`/`atol`, the 4th-order DOPRI5 continuous extension for samples between steps, and the DOPRI5 stiffness test (15 hits of h·|λ| > 3.25).
+- **Stiff solver:** RODAS3 (Sandu et al. 1997, KPP formulation). It's a 4-stage Rosenbrock method of order 3, with an embedded order-2 error estimate, and it's L-stable and stiffly accurate. It uses the analytic Jacobian and an in-house LU with partial pivoting (`lu_factor` / `lu_solve`), and cubic Hermite interpolation for samples.
+- **Guards:** a step budget (`max_steps`, per solver), a wall-clock limit (`max_wall_seconds`, checked every 64 attempted steps), `max_conc`, `min_conc` (−1e-8), non-finite values, and step-size underflow. They are checked at every accepted step and every sample.
+- **Auto policy:** run RK45 first. If it reports stiffness, the step budget or step underflow, carry on from the last accepted point with RODAS3. Samples already taken are kept.
+- **Sample times:** `simulate()` samples at t_i = t_end·i/(n_points−1), including both ends. On failure it returns the samples up to that point together with a `SimStatus`.
+
+Tests (Release): **3/3 CTest tests passed. Doctest: 27/27 cases and 777,386 assertions passed.**
+- **LU:** 200 random systems with n ≤ 20 have residuals below 1e-9, and singular matrices are detected.
+- **dy/dt = −ky at t = 10:** relative error 1.1e-9 (RK45) and 1.8e-9 (RODAS3), against a limit of 1e-6. Interior samples are just as accurate.
+- **Lotka–Volterra over t = 50:** the conserved quantity drifts by at most 1.5e-10 relative (limit 1e-5), for both RK45 and Auto.
+- **Robertson to t = 1e4 with RODAS3:** 422 accepted steps (budget 50,000). y1+y2+y3 stays within 1.3e-15 of 1 (limit 1e-6). The final state matches the SciPy reference to within 2.4e-6 relative. The Auto policy switches to RODAS3 on this problem.
+- **Brusselator period:** 7.15692 with every solver, against the reference 7.1569199212, a relative error of about 2e-7 (limit 2%).
+- **Explosive `S0 → 2 S0` (k = 50):** every method stops with `MaxConc` in under a second.
+- **Guards:** the step budget, wall clock and concentration floor each stop a simulation with the right status.
+- **Determinism:** two identical runs give bit-identical samples.
+
+Bug found and fixed during M3: `lu_solve` applied the row swaps interleaved with forward elimination, but `lu_factor` swaps whole rows, L multipliers included. The new LU test caught it with residuals around 7. The solver tests hadn't, because 2–3-species systems rarely pivot in a way that exposes it.
 
 ## M2: ODE model and Jacobian
 
@@ -69,6 +90,14 @@ Tests (Release): **3/3 CTest tests passed. Doctest: 11/11 cases and 775,806 asse
 ### M2
 - **Jacobian error measure:** the finite-difference comparison uses the matrix-norm relative error, max|J_analytic − J_fd| / max|J_analytic|. Entry-wise relative error isn't meaningful for entries that are zero or cancel to almost zero. The FD step is h = 1e-5·max(1, |s|).
 - **Boundary-derivative test:** "boundary species have zero derivative" is tested structurally. Boundary species have no state entry, no row in N and no Jacobian column, and the model never writes their concentrations.
+
+### M3
+- **Stiff method:** RODAS3 rather than ROS3P, because ROS3P is A-stable but not L-stable, and the spec asks for L-stable. RODAS3's coefficients are simple rationals, and it's stiffly accurate.
+- **Brusselator reference:** T = 7.1569199212, from SciPy `solve_ivp` with DOP853 and with Radau (rtol 1e-12, atol 1e-14; they agree to 1e-10). It's the mean spacing of upward crossings of x = 1 over t ∈ [200, 400], starting from (1, 1). The script lives outside the repo; the method is recorded in a comment in the test.
+- **Robertson reference** at t = 1e4: (0.1073004285, 4.800166973e-7, 0.8926990914), from SciPy Radau and LSODA (rtol 1e-12). This check goes beyond what the spec asks.
+- **Step budget:** it applies per solver, so in Auto mode RK45 and RODAS3 each get `max_steps`. RODAS3 continues from where RK45 stopped instead of restarting.
+- **Wall-clock guard and determinism:** results depend on the wall clock only when the guard actually fires, which a normal simulation shouldn't. The default limit is 10 s per simulation. If this ever matters for byte-identical logs, raise the limit.
+- **Dense output:** for RODAS3 it's a cubic Hermite (3rd order, the same as the method). Both interpolants preserve linear conservation laws.
 
 ## Open issues
 

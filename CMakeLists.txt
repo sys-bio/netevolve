@@ -17,6 +17,7 @@ add_compile_definitions(NETEVOLVE_VERSION="${PROJECT_VERSION}")
 add_library(netevolve_core STATIC
   src/network.cpp
   src/model.cpp
+  src/integrator.cpp
 )
 target_include_directories(netevolve_core PUBLIC src)
 
@@ -32,6 +33,7 @@ add_executable(netevolve_tests
   tests/test_smoke.cpp
   tests/test_network.cpp
   tests/test_model.cpp
+  tests/test_integrator.cpp
 )
 target_include_directories(netevolve_tests PRIVATE third_party)
 target_link_libraries(netevolve_tests PRIVATE netevolve_core)
