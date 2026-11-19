@@ -1,5 +1,6 @@
 // netevolve command-line entry point.
 #include <charconv>
+#include <chrono>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -117,10 +118,15 @@ int cmd_evolve(int argc, char** argv) {
     }
     ne::validate_config(cfg);
     std::cout << "netevolve evolve: seed " << cfg.seed << ", population " << cfg.population << ", generations "
-              << cfg.generations << ", output " << cfg.output_dir << "\n";
+              << cfg.generations << ", threads " << ne::resolve_threads(cfg.threads) << ", output "
+              << cfg.output_dir << "\n";
+    const auto start = std::chrono::steady_clock::now();
     const ne::EvolutionResult res = ne::run_evolve_command(cfg, &std::cout);
+    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     std::cout << "best fitness " << res.best_fitness << " (generation " << res.best_generation << ", "
               << res.best.reactions.size() << " reactions)\n";
+    std::cout << res.n_evaluations << " evaluations in " << secs << " s ("
+              << (secs > 0 ? res.n_evaluations / secs : 0.0) << " per second)\n";
     return 0;
 }
 

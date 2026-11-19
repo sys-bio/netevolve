@@ -254,6 +254,72 @@ TEST_CASE("determinism: log rows are identical for the same seed when fitness va
     CHECK(first.find(",0,0,0,") == std::string::npos);  // statistics are not all zero
 }
 
+TEST_CASE("M6: log.csv is byte-identical for threads = 1 and threads = 8") {
+    // Seed 27 with population 100 reaches a non-zero oscillation fitness
+    // (0.257) by generation 4, so the logs carry real numbers.
+    auto run_with = [](int threads, const std::string& name) {
+        Config c;
+        c.population = 100;
+        c.generations = 4;
+        c.seed = 27;
+        c.threads = threads;
+        c.output_dir = fresh_dir(name).string();
+        run_evolve_command(c);
+        return fs::path(c.output_dir);
+    };
+    const fs::path one = run_with(1, "threads_1"), eight = run_with(8, "threads_8"), all = run_with(0, "threads_0");
+    const std::string log1 = read_file(one / "log.csv");
+    CHECK(log1 == read_file(eight / "log.csv"));
+    CHECK(log1 == read_file(all / "log.csv"));
+    for (const char* f : {"best_final.ant", "best_final.csv"}) {
+        CAPTURE(f);
+        CHECK(read_file(one / f) == read_file(eight / f));
+        CHECK(read_file(one / f) == read_file(all / f));
+    }
+    // The run is not trivial: some generation has a non-zero best fitness.
+    const Network best = load_antimony_file((one / "best_final.ant").string());
+    CHECK(oscillation_fitness(best, fitness_params(Config{})) > 0.0);
+    for (const fs::path& d : {one, eight, all}) fs::remove_all(d);
+}
+
+TEST_CASE("M6: evolve() results do not depend on the thread count") {
+    Config cfg;
+    cfg.population = 120;
+    cfg.generations = 30;
+    cfg.target_fitness = 2.0;
+    auto f = [](const Network& n) {
+        double s = 0;
+        for (const Reaction& r : n.reactions) s += std::sin(3.0 * std::log(r.k)) + 0.1 * r.reactants.size();
+        return 0.5 + 0.5 * std::tanh(s / 5);
+    };
+    std::string reference;
+    for (int threads : {1, 2, 3, 8, 17}) {
+        CAPTURE(threads);
+        Config c = cfg;
+        c.threads = threads;
+        const EvolutionResult res = evolve(c, f);
+        std::string rows;
+        for (const GenerationStats& s : res.log) rows += log_row(s) + "\n";
+        rows += write_antimony(res.best);
+        if (reference.empty()) reference = rows;
+        CHECK(rows == reference);
+        // 120 in generation 0, then 108 new children (12 elites) in each of 30 generations.
+        CHECK(res.n_evaluations == 120 + 30 * 108);
+    }
+}
+
+TEST_CASE("M6: an exception in a worker thread reaches the caller") {
+    Config cfg;
+    cfg.population = 50;
+    cfg.generations = 3;
+    cfg.threads = 4;
+    auto bad = [](const Network& n) -> double {
+        if (n.reactions.size() == 6 && n.reactions[0].k > 50) throw std::runtime_error("fitness failed");
+        return 0.0;
+    };
+    CHECK_THROWS_WITH_AS(evolve(cfg, bad), "fitness failed", std::runtime_error);
+}
+
 TEST_CASE("evolve command writes the documented output files") {
     const fs::path d = fresh_dir("outputs");
     const Config cfg = small_config(d.string());

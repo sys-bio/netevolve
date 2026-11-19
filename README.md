@@ -14,7 +14,7 @@ It's written in C++20 and uses only the standard library. Tests use [doctest](ht
 | M3 | Integrators (RK45, RODAS3) | done |
 | M4 | Oscillation fitness; `simulate` and `fitness` commands | done |
 | M5 | Mutation and evolutionary loop; `evolve` command | done |
-| M6 | Parallel evaluation | not started |
+| M6 | Parallel evaluation | done |
 | M7 | `prune`, long-run check, acceptance test | not started |
 
 Details and test results for each milestone are in [PROGRESS.md](PROGRESS.md).
@@ -59,7 +59,9 @@ Flags override the config file. Progress is printed once per generation. The out
 | `best_final.csv` | time course of the best network (`t_end`, `n_points` from the config) |
 | `run.cfg` | the fully resolved config, including the seed used |
 
-A run stops after `generations` generations, or earlier once the best fitness reaches `target_fitness`. The same seed and config give byte-identical outputs.
+A run stops after `generations` generations, or earlier once the best fitness reaches `target_fitness`. The same seed and config give byte-identical outputs, whatever the thread count.
+
+Fitness evaluation runs on `threads` threads (0 means all cores). On the development machine, an 8-thread laptop CPU, the default config evaluates about 1,450 networks per second on one thread and about 9,000 per second on 8, so a full 500-generation default run takes roughly 10–15 seconds.
 
 ### Simulate a model
 
@@ -97,7 +99,7 @@ Exit codes: 0 for success, 1 for a runtime error (for example a bad model file, 
 - deleting a reaction;
 - rewiring one participant to another species.
 
-The chances follow `p_rate : p_add : p_delete : p_rewire`. If a mutation would make the network invalid, it's retried up to 10 times; after that the child is a copy of its parent. Every random draw comes from one `mt19937_64` seeded with `seed`.
+The chances follow `p_rate : p_add : p_delete : p_rewire`. If a mutation would make the network invalid, it's retried up to 10 times; after that the child is a copy of its parent. Every random draw comes from one `mt19937_64` seeded with `seed`, and all of them happen in the serial part of the loop. Only the pure fitness evaluations run in parallel.
 
 **Oscillation fitness.** This follows SPEC §1.4:
 1. Discard the first `transient_fraction` of the samples.

@@ -44,10 +44,15 @@ struct EvolutionResult {
     Network best;
     double best_fitness = 0.0;
     int best_generation = 0;
+    long n_evaluations = 0;  // fitness evaluations performed (cached elites excluded)
     std::vector<GenerationStats> log;
 };
 
+// Must be safe to call concurrently from several threads (cfg.threads > 1).
 using FitnessFn = std::function<double(const Network&)>;
+
+// Number of worker threads for `threads` (0 = all hardware threads).
+int resolve_threads(int threads);
 
 struct EvolutionCallbacks {
     // Called after each generation is evaluated.

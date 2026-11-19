@@ -1,14 +1,18 @@
 #include "evolve.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <charconv>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <exception>
 #include <fstream>
+#include <mutex>
 #include <numeric>
 #include <ostream>
 #include <stdexcept>
+#include <thread>
 
 #include "fitness.hpp"
 #include "integrator.hpp"
@@ -149,7 +153,51 @@ GenerationStats stats_of(int gen, const std::vector<Individual>& sorted) {
     return s;
 }
 
+// Evaluates every individual that has no fitness yet, on `threads` threads.
+// Workers take indices from a shared counter and write only their own slot,
+// and the fitness function is pure, so the results do not depend on the
+// thread count or on scheduling. Returns the number of evaluations.
+long evaluate_pending(std::vector<Individual>& pop, const FitnessFn& fitness, int threads) {
+    std::vector<std::size_t> todo;
+    for (std::size_t i = 0; i < pop.size(); ++i)
+        if (!pop[i].evaluated) todo.push_back(i);
+    const int n_threads = std::min(threads, static_cast<int>(todo.size()));
+
+    if (n_threads <= 1) {
+        for (std::size_t i : todo) pop[i].fitness = fitness(pop[i].net);
+    } else {
+        std::atomic<std::size_t> next{0};
+        std::exception_ptr error;
+        std::mutex error_mutex;
+        auto worker = [&] {
+            for (;;) {
+                const std::size_t k = next.fetch_add(1);
+                if (k >= todo.size()) return;
+                try {
+                    pop[todo[k]].fitness = fitness(pop[todo[k]].net);
+                } catch (...) {
+                    std::lock_guard<std::mutex> lock(error_mutex);
+                    if (!error) error = std::current_exception();
+                }
+            }
+        };
+        std::vector<std::thread> pool;
+        pool.reserve(n_threads);
+        for (int t = 0; t < n_threads; ++t) pool.emplace_back(worker);
+        for (std::thread& th : pool) th.join();
+        if (error) std::rethrow_exception(error);
+    }
+    for (std::size_t i : todo) pop[i].evaluated = true;
+    return static_cast<long>(todo.size());
+}
+
 }  // namespace
+
+int resolve_threads(int threads) {
+    if (threads > 0) return threads;
+    const unsigned hw = std::thread::hardware_concurrency();
+    return hw > 0 ? static_cast<int>(hw) : 1;
+}
 
 EvolutionResult evolve(const Config& cfg, const FitnessFn& fitness, const EvolutionCallbacks& cb) {
     validate_config(cfg);
@@ -164,16 +212,13 @@ EvolutionResult evolve(const Config& cfg, const FitnessFn& fitness, const Evolut
     const GenParams gp = gen_params(cfg);
     for (Individual& ind : pop) ind.net = random_network(rng, gp);
 
+    const int threads = resolve_threads(cfg.threads);
     EvolutionResult result;
     result.best_fitness = -1.0;
     for (int gen = 0;; ++gen) {
         // Evaluate (elites carried over keep their fitness: evaluation is pure).
-        for (Individual& ind : pop) {
-            if (!ind.evaluated) {
-                ind.fitness = fitness(ind.net);
-                ind.evaluated = true;
-            }
-        }
+        // This is the only parallel part; all random draws stay serial.
+        result.n_evaluations += evaluate_pending(pop, fitness, threads);
         // Sort by fitness, best first; ties keep their order.
         std::stable_sort(pop.begin(), pop.end(),
                          [](const Individual& a, const Individual& b) { return a.fitness > b.fitness; });

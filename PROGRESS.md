@@ -2,9 +2,35 @@
 
 ## Current milestone
 
-**M5 (mutation and the evolutionary loop) is complete.** It's waiting for the human's approval before M6 starts.
+**M6 (parallel evaluation and performance) is complete.** It's waiting for the human's approval before M7 starts.
 
 Remote: https://github.com/zyrrron/netevolve (private), branch `main`.
+
+## M6: Parallel evaluation and performance
+
+Done:
+- `evaluate_pending()` in `src/evolve.cpp` evaluates the individuals with no fitness yet on `resolve_threads(cfg.threads)` `std::thread`s (0 means `hardware_concurrency`).
+  - Workers take indices from an atomic counter, and each writes only its own individual's fitness. The fitness function is pure: each call builds its own `Model` and `SimResult`.
+  - Every random draw (initial population, parent choice, mutation) stays in the serial part of the loop, so results can't depend on the thread count or on scheduling.
+  - An exception thrown in a worker is captured and rethrown in the caller.
+  - Threads are created per generation. That overhead is negligible next to about 180 evaluations of roughly 0.7 ms each.
+- `EvolutionResult::n_evaluations` counts fitness evaluations; cached elites aren't re-evaluated. `evolve` prints the number of evaluations, the elapsed time and the evaluations per second.
+
+Tests (Release): **8/8 CTest tests passed. Doctest: 59/59 cases and 1,575,573 assertions passed.** The M6 cases passed on 3 repeated runs.
+- `log.csv`, `best_final.ant` and `best_final.csv` are byte-identical for `threads = 1`, `8` and `0` (all cores). The test uses a real oscillation run (seed 27, population 100, 4 generations) that reaches a non-zero best fitness, so the logs aren't trivially all zeros.
+- `evolve()` with a varying toy fitness gives identical logs and best networks for 1, 2, 3, 8 and 17 threads. The evaluation count is exact: 120 + 30 × 108.
+- An exception in a worker thread reaches the caller.
+
+**Evaluations per second** (information only; default config, 40 generations, 7,400 evaluations, Release, 8 hardware threads):
+
+| threads | evals/s | speed-up |
+|---|---|---|
+| 1 | 1,455 | 1.0× |
+| 2 | 2,729 | 1.9× |
+| 4 | 5,049 | 3.5× |
+| 8 | 9,247 | 6.4× |
+
+**Preview of a full default run** (seed 42, 8 threads), for information ahead of M7. The best fitness stayed at 0 for generations 0–135, then climbed to **1.0 by generation 140**, and the run stopped at the target. It took 25,400 evaluations in 3.2 s. The best network is an 8-reaction relaxation oscillator; for example, S1 swings between 0.18 and 256. Re-simulated to t = 500, the amplitude in [450, 500] matches [50, 100]. So the oscillation is genuine, not an artifact, and the default search can find oscillators despite the flat start.
 
 ## M5: Mutation and the evolutionary loop
 
@@ -184,9 +210,12 @@ Tests (Release): **3/3 CTest tests passed. Doctest: 11/11 cases and 775,806 asse
 - **Rewire:** chooses a molecule slot uniformly over all reactant and product molecules of a uniformly chosen reaction, and replaces it with a uniformly chosen *different* species.
 - **Absolute amplitude floor (1e-6):** a deliberate addition to SPEC §1.4. It's a constant in `OscillationParams`, not a config key, because SPEC §2 fixes the key list. It's cheap to change or remove.
 - **RODAS3 sampling:** steps land exactly on every sample time. This caps the RODAS3 step at the sample spacing (0.1 by default), so a stiff simulation takes at least `n_points` steps.
-- **`threads`:** ignored until M6, so M5 is single-threaded.
+
+### M6
+- **Threads:** the pool is created per generation instead of being kept alive, because that's simpler and the overhead is negligible.
+- **Wall-clock guard:** this is the only possible source of thread-count dependence. If heavy CPU load ever made a simulation exceed `max_wall_seconds` (10 s, against a typical 0.7 ms), its fitness would become 0. It hasn't happened in any run so far.
 
 ## Open issues
 
-- **M7 risk:** the oscillation fitness landscape is very flat for random 4-species networks (see the M5 notes). Watch the M7 acceptance run.
+- **M7 risk (reduced):** the fitness landscape is flat for random networks (see the M5 notes), but the full default run with seed 42 still reached fitness 1.0 by generation 140 (see M6). Seeds 1–5 will be tested in M7.
 
