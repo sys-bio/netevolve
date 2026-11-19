@@ -6,9 +6,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 if(MSVC)
-  add_compile_options(/W4 /permissive- /EHsc)
+  # Warnings are errors from M2 onwards (spec §0.2).
   # Release already gets /O2 from CMake's default MSVC flags.
-  # Warnings become errors from M2 onwards (spec §0.2).
+  add_compile_options(/W4 /WX /permissive- /EHsc)
 endif()
 
 add_compile_definitions(NETEVOLVE_VERSION="${PROJECT_VERSION}")
@@ -16,6 +16,7 @@ add_compile_definitions(NETEVOLVE_VERSION="${PROJECT_VERSION}")
 # --- Core library (everything except main) -----------------------------
 add_library(netevolve_core STATIC
   src/network.cpp
+  src/model.cpp
 )
 target_include_directories(netevolve_core PUBLIC src)
 
@@ -30,6 +31,7 @@ add_executable(netevolve_tests
   tests/test_main.cpp
   tests/test_smoke.cpp
   tests/test_network.cpp
+  tests/test_model.cpp
 )
 target_include_directories(netevolve_tests PRIVATE third_party)
 target_link_libraries(netevolve_tests PRIVATE netevolve_core)
