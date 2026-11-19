@@ -1,6 +1,18 @@
 // netevolve command-line entry point.
+#include <charconv>
+#include <fstream>
 #include <iostream>
+#include <map>
+#include <set>
+#include <stdexcept>
+#include <string>
 #include <string_view>
+
+#include "config.hpp"
+#include "fitness.hpp"
+#include "integrator.hpp"
+#include "model.hpp"
+#include "network.hpp"
 
 namespace {
 
@@ -13,6 +25,87 @@ void print_usage(std::ostream& os) {
           "  netevolve --version\n";
 }
 
+// Command-line misuse: reported with the usage text, exit code 2.
+struct UsageError : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
+// Parses "--flag value" pairs after the command. Every flag takes a value.
+std::map<std::string, std::string> parse_flags(int argc, char** argv, const std::set<std::string>& allowed) {
+    std::map<std::string, std::string> flags;
+    for (int i = 2; i < argc; ++i) {
+        const std::string flag = argv[i];
+        if (!allowed.count(flag)) throw UsageError("unknown option '" + flag + "' for '" + argv[1] + "'");
+        if (i + 1 >= argc) throw UsageError("option '" + flag + "' needs a value");
+        if (!flags.emplace(flag, argv[++i]).second) throw UsageError("option '" + flag + "' given twice");
+    }
+    return flags;
+}
+
+std::string require_flag(const std::map<std::string, std::string>& f, const std::string& name) {
+    auto it = f.find(name);
+    if (it == f.end()) throw UsageError("missing required option '" + name + "'");
+    return it->second;
+}
+
+template <class T>
+T flag_number(const std::string& flag, const std::string& text) {
+    T v{};
+    auto res = std::from_chars(text.data(), text.data() + text.size(), v);
+    if (res.ec != std::errc() || res.ptr != text.data() + text.size())
+        throw UsageError("invalid value '" + text + "' for '" + flag + "'");
+    return v;
+}
+
+void write_file(const std::string& path, const std::string& content) {
+    std::ofstream out(path, std::ios::binary);
+    if (!out) throw std::runtime_error("cannot write '" + path + "'");
+    out << content;
+    if (!out) throw std::runtime_error("error writing '" + path + "'");
+}
+
+int cmd_simulate(int argc, char** argv) {
+    const auto f = parse_flags(argc, argv, {"--model", "--t-end", "--points", "--csv"});
+    const ne::Network net = ne::load_antimony_file(require_flag(f, "--model"));
+    const ne::Config defaults;
+    const double t_end = f.count("--t-end") ? flag_number<double>("--t-end", f.at("--t-end")) : defaults.t_end;
+    const int points = f.count("--points") ? flag_number<int>("--points", f.at("--points")) : defaults.n_points;
+    if (!(t_end > 0)) throw UsageError("--t-end must be > 0");
+    if (points < 2) throw UsageError("--points must be >= 2");
+
+    ne::SolverOptions opts;
+    opts.max_conc = defaults.max_conc;
+    const ne::SimResult r = ne::simulate(ne::make_model(net), net.init, t_end, points, opts);
+    const std::string csv = ne::simulation_csv(r, net);
+    if (f.count("--csv")) write_file(f.at("--csv"), csv);
+    else std::cout << csv;
+
+    if (!r.ok()) {
+        std::cerr << "warning: simulation stopped at t = " << (r.t.empty() ? 0.0 : r.t.back()) << ": "
+                  << ne::to_string(r.status) << "\n";
+        return 1;
+    }
+    return 0;
+}
+
+int cmd_fitness(int argc, char** argv) {
+    const auto f = parse_flags(argc, argv, {"--model", "--config"});
+    const ne::Network net = ne::load_antimony_file(require_flag(f, "--model"));
+    ne::Config cfg;
+    if (f.count("--config")) cfg = ne::load_config_file(f.at("--config"));
+    ne::validate_config(cfg);
+
+    const ne::FitnessReport rep = ne::evaluate_oscillation(net, ne::fitness_params(cfg));
+    std::cout << "status: " << ne::to_string(rep.status) << "\n";
+    for (std::size_t s = 0; s < rep.species.size(); ++s) {
+        const ne::SignalScore& sc = rep.species[s];
+        std::cout << ne::species_name(net, static_cast<int>(s)) << ": pairs " << sc.n_pairs << ", damping "
+                  << sc.damping << ", score " << sc.score << "\n";
+    }
+    std::cout << "fitness " << rep.fitness << "\n";
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -21,15 +114,28 @@ int main(int argc, char** argv) {
         return 2;
     }
     const std::string_view cmd = argv[1];
-    if (cmd == "--version") {
-        std::cout << "netevolve " << NETEVOLVE_VERSION << "\n";
-        return 0;
+    try {
+        if (cmd == "--version") {
+            std::cout << "netevolve " << NETEVOLVE_VERSION << "\n";
+            return 0;
+        }
+        if (cmd == "--help" || cmd == "-h") {
+            print_usage(std::cout);
+            return 0;
+        }
+        if (cmd == "simulate") return cmd_simulate(argc, argv);
+        if (cmd == "fitness") return cmd_fitness(argc, argv);
+        if (cmd == "evolve" || cmd == "prune") {
+            std::cerr << "error: '" << cmd << "' is not implemented yet\n";
+            return 1;
+        }
+        throw UsageError("unknown command '" + std::string(cmd) + "'");
+    } catch (const UsageError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        print_usage(std::cerr);
+        return 2;
+    } catch (const std::exception& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
     }
-    if (cmd == "--help" || cmd == "-h") {
-        print_usage(std::cout);
-        return 0;
-    }
-    std::cerr << "error: unknown command '" << cmd << "'\n";
-    print_usage(std::cerr);
-    return 2;
 }

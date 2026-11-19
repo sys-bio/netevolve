@@ -4,6 +4,7 @@
 #pragma once
 
 #include <span>
+#include <string>
 #include <vector>
 
 #include "model.hpp"
@@ -57,6 +58,10 @@ struct SimResult {
 // t_i = t_end * i / (n_points - 1), including both ends. n_points >= 2.
 SimResult simulate(const Model& m, std::span<const double> y0, double t_end, int n_points,
                    const SolverOptions& opts = {});
+
+// Time course as CSV: header "time,S0,S1,...", then one row per sample.
+// Values are written in the shortest form that reads back exactly.
+std::string simulation_csv(const SimResult& r, const Network& net);
 
 // In-house LU factorisation with partial pivoting of an n x n row-major
 // matrix, in place. Returns false if the matrix is singular.

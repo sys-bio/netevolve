@@ -2,9 +2,39 @@
 
 ## Current milestone
 
-**M3 (integrators) is complete.** It's waiting for the human's approval before M4 starts.
+**M4 (fitness function) is complete.** It's waiting for the human's approval before M5 starts.
 
 Remote: https://github.com/zyrrron/netevolve (private), branch `main`.
+
+## M4: Fitness function
+
+Done:
+- `src/fitness.hpp/.cpp`:
+  - `find_extrema` detects peaks and troughs with an amplitude filter.
+  - `signal_score` scores one species as in SPEC §1.4, after discarding the transient.
+  - `oscillation_report`, `evaluate_oscillation` and `oscillation_fitness` compute the network fitness: the best species score, or 0 if the simulation fails.
+  - `fitness_params(Config)` maps config keys to fitness settings.
+- `src/config.hpp/.cpp`: the `key = value` config parser from SPEC §2, with all keys. It handles errors with line numbers, `validate_config`, and `write_config` (for `run.cfg` in M5). `examples/default.cfg` is the spec's config.
+- CLI: `simulate` (CSV to stdout or `--csv`) and `fitness` (per-species breakdown plus the fitness value). `parse_flags` rejects unknown options, missing values and repeated options. Exit codes are 0 for success, 1 for runtime errors and 2 for usage errors.
+- `examples/damped.ant`: the Brusselator with B = 1.5, a stable focus with eigenvalues −0.25 ± 0.968i.
+- `README.md`: building, usage, the fitness definition, the Antimony subset and Tellurium.
+
+Tests (Release): **7/7 CTest tests passed. Doctest: 44/44 cases and 777,521 assertions passed.**
+- **Synthetic signals:**
+  - sin(t) over 10 periods: n ≥ 5, d < 1e-3, score > 0.99.
+  - e^{−0.3t} sin(t): score 0.003, below 0.5.
+  - A constant signal and increasing and decreasing ramps all score 0.
+  - sin(t) with ±0.1% uniform noise: the same pair count as the clean signal across 20 trials.
+  - The same at 20,000 samples, where noise creates more than 1,100 raw extrema: the filter keeps exactly the 10 real ones.
+- **Models:**
+  - `brusselator.ant` scores 0.9996 (S0: 7 pairs, d = 4e-4).
+  - `damped.ant` scores 0.
+  - A blow-up network stops with `MaxConc` and scores exactly 0.
+- **Extrema unit tests:** alternation, merging of ripples, flat tops, and ripple at the window edges.
+- **Config:** `default.cfg` matches the defaults. Also covered: comments, round trip, and errors for an unknown key, a bad value or a missing `=`, each with its line number.
+- **CLI (CTest):** `simulate` prints the expected CSV header and first row; `fitness` reports ≥ 0.95 for the Brusselator; an unknown option and a bad model file both fail.
+
+Defect found and fixed during M4: `find_extrema` committed the last pending extremum unconditionally. With noise, a ripple at the end of the window, where the signal was still rising, counted as a peak. The dense-noise test caught it. An edge extremum now counts only if the signal really moves past the threshold beyond it (after it, for the last one; before it, for the first).
 
 ## M3: Integrators
 
@@ -98,6 +128,15 @@ Tests (Release): **3/3 CTest tests passed. Doctest: 11/11 cases and 775,806 asse
 - **Step budget:** it applies per solver, so in Auto mode RK45 and RODAS3 each get `max_steps`. RODAS3 continues from where RK45 stopped instead of restarting.
 - **Wall-clock guard and determinism:** results depend on the wall clock only when the guard actually fires, which a normal simulation shouldn't. The default limit is 10 s per simulation. If this ever matters for byte-identical logs, raise the limit.
 - **Dense output:** for RODAS3 it's a cubic Hermite (3rd order, the same as the method). Both interpolants preserve linear conservation laws.
+
+### M4
+- **Amplitude threshold:** `min_rel_amplitude × mean(|y|)` instead of `× mean(y)`. For concentrations, which are never negative, the two are identical. For the zero-mean `sin(t)` test signals that the spec asks for, `mean(y) ≈ 0` would make the filter useless.
+- **Filtering:** "keep only alternating pairs whose height difference exceeds the threshold" is implemented as hysteresis over the raw extrema. Same-kind candidates merge into the more extreme one, and an opposite-kind candidate confirms the pending extremum only if it differs by more than the threshold.
+- **Pairing:** pairs are consecutive extrema (e0, e1), (e2, e3), …, starting from the first confirmed extremum, whatever its kind. So `n = floor(#extrema / 2)`, and a pair's amplitude is |e_2k − e_2k+1|.
+- **Noise in the test:** "noise at 0.1% of the amplitude" is read as uniform noise in ±0.001 for a unit-amplitude sine.
+- **Solver settings for fitness:** rtol 1e-6 and atol 1e-9 (defaults), max_conc from the config. The config doesn't expose solver tolerances, because the spec doesn't list them.
+- **`simulate` on failure:** it writes the samples computed so far, prints a warning and exits with 1.
+- **`evolve` and `prune`:** they print "not implemented yet" and exit with 1 until M5 and M7.
 
 ## Open issues
 

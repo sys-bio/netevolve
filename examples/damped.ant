@@ -1,0 +1,13 @@
+// Damped oscillator: the Brusselator of brusselator.ant with B = 1.5.
+//   S0 = x, S1 = y, X0 = A = 1, X1 = B = 1.5, X2 = sink.
+// Now B < 1 + A^2, so the fixed point (1, 1.5) is a stable focus:
+// eigenvalues -0.25 +/- 0.968i, so trajectories spiral in and the
+// oscillation decays like exp(-t/4).
+const X0, X1, X2;
+J0: X0 -> S0; k0*X0;
+J1: 2 S0 + S1 -> 3 S0; k1*S0*S0*S1;
+J2: X1 + S0 -> S1 + X2; k2*X1*S0;
+J3: S0 -> X2; k3*S0;
+k0 = 1; k1 = 1; k2 = 1; k3 = 1;
+S0 = 2; S1 = 1;
+X0 = 1; X1 = 1.5; X2 = 0;

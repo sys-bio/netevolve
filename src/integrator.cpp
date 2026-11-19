@@ -1,6 +1,7 @@
 #include "integrator.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <stdexcept>
@@ -19,6 +20,26 @@ const char* to_string(SimStatus s) {
         case SimStatus::NonFinite: return "non-finite value";
     }
     return "?";
+}
+
+std::string simulation_csv(const SimResult& r, const Network& net) {
+    std::string out = "time";
+    for (int s = 0; s < r.n_state; ++s) out += "," + species_name(net, s);
+    out += "\n";
+    char buf[64];
+    auto put = [&](double x) {
+        auto res = std::to_chars(buf, buf + sizeof buf, x);
+        out.append(buf, res.ptr);
+    };
+    for (int i = 0; i < r.n_samples(); ++i) {
+        put(r.t[i]);
+        for (int s = 0; s < r.n_state; ++s) {
+            out += ",";
+            put(r.at(i, s));
+        }
+        out += "\n";
+    }
+    return out;
 }
 
 // ---------------------------------------------------------------------------

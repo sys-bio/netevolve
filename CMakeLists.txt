@@ -18,6 +18,8 @@ add_library(netevolve_core STATIC
   src/network.cpp
   src/model.cpp
   src/integrator.cpp
+  src/config.cpp
+  src/fitness.cpp
 )
 target_include_directories(netevolve_core PUBLIC src)
 
@@ -34,6 +36,8 @@ add_executable(netevolve_tests
   tests/test_network.cpp
   tests/test_model.cpp
   tests/test_integrator.cpp
+  tests/test_config.cpp
+  tests/test_fitness.cpp
 )
 target_include_directories(netevolve_tests PRIVATE third_party)
 target_link_libraries(netevolve_tests PRIVATE netevolve_core)
@@ -48,3 +52,14 @@ add_test(NAME cli_version_exit COMMAND netevolve --version)
 add_test(NAME cli_version_output COMMAND netevolve --version)
 set_tests_properties(cli_version_output PROPERTIES
   PASS_REGULAR_EXPRESSION "^netevolve [0-9]+\\.[0-9]+\\.[0-9]+")
+
+# --- CLI commands (M4) ---------------------------------------------------
+set(EX "${CMAKE_SOURCE_DIR}/examples")
+add_test(NAME cli_simulate COMMAND netevolve simulate --model ${EX}/brusselator.ant --t-end 10 --points 11)
+set_tests_properties(cli_simulate PROPERTIES PASS_REGULAR_EXPRESSION "^time,S0,S1\n0,1,1\n")
+add_test(NAME cli_fitness_brusselator COMMAND netevolve fitness --model ${EX}/brusselator.ant --config ${EX}/default.cfg)
+set_tests_properties(cli_fitness_brusselator PROPERTIES PASS_REGULAR_EXPRESSION "fitness (0\\.9[5-9][0-9]*|1)\n")
+add_test(NAME cli_unknown_option COMMAND netevolve simulate --model ${EX}/brusselator.ant --bogus 1)
+set_tests_properties(cli_unknown_option PROPERTIES WILL_FAIL TRUE)
+add_test(NAME cli_bad_model COMMAND netevolve fitness --model ${EX}/default.cfg)
+set_tests_properties(cli_bad_model PROPERTIES WILL_FAIL TRUE)
