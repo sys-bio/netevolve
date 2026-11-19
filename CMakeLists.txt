@@ -13,9 +13,15 @@ endif()
 
 add_compile_definitions(NETEVOLVE_VERSION="${PROJECT_VERSION}")
 
+# --- Core library (everything except main) -----------------------------
+add_library(netevolve_core STATIC
+  src/network.cpp
+)
+target_include_directories(netevolve_core PUBLIC src)
+
 # --- CLI ---------------------------------------------------------------
 add_executable(netevolve src/main.cpp)
-target_include_directories(netevolve PRIVATE src)
+target_link_libraries(netevolve PRIVATE netevolve_core)
 
 # --- Tests -------------------------------------------------------------
 enable_testing()
@@ -23,8 +29,12 @@ enable_testing()
 add_executable(netevolve_tests
   tests/test_main.cpp
   tests/test_smoke.cpp
+  tests/test_network.cpp
 )
-target_include_directories(netevolve_tests PRIVATE src third_party)
+target_include_directories(netevolve_tests PRIVATE third_party)
+target_link_libraries(netevolve_tests PRIVATE netevolve_core)
+target_compile_definitions(netevolve_tests PRIVATE
+  NETEVOLVE_EXAMPLES_DIR="${CMAKE_SOURCE_DIR}/examples")
 
 add_test(NAME unit_tests COMMAND netevolve_tests)
 
