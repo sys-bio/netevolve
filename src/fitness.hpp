@@ -16,6 +16,11 @@ struct OscillationParams {
     double transient_fraction = 0.5;
     int n_target = 5;
     double min_rel_amplitude = 0.01;
+    // Absolute floor on the peak-trough difference. Without it, a species
+    // that has decayed to ~0 has a ~0 relative threshold, and integrator
+    // noise at the atol level (~1e-9) scores as a perfect oscillation.
+    // Not in the spec; see PROGRESS.md (M5).
+    double min_abs_amplitude = 1e-6;
 };
 
 struct Extremum {

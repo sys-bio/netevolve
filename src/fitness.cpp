@@ -57,7 +57,8 @@ SignalScore signal_score(std::span<const double> y, const OscillationParams& p) 
     for (double v : w) mean_abs += std::abs(v);
     mean_abs /= static_cast<double>(w.size());
 
-    const std::vector<Extremum> ext = find_extrema(w, p.min_rel_amplitude * mean_abs);
+    const double threshold = std::max(p.min_rel_amplitude * mean_abs, p.min_abs_amplitude);
+    const std::vector<Extremum> ext = find_extrema(w, threshold);
     s.n_pairs = static_cast<int>(ext.size() / 2);
     if (s.n_pairs == 0) return s;
 

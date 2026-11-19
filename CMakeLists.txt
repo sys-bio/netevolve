@@ -20,6 +20,7 @@ add_library(netevolve_core STATIC
   src/integrator.cpp
   src/config.cpp
   src/fitness.cpp
+  src/evolve.cpp
 )
 target_include_directories(netevolve_core PUBLIC src)
 
@@ -38,6 +39,7 @@ add_executable(netevolve_tests
   tests/test_integrator.cpp
   tests/test_config.cpp
   tests/test_fitness.cpp
+  tests/test_evolve.cpp
 )
 target_include_directories(netevolve_tests PRIVATE third_party)
 target_link_libraries(netevolve_tests PRIVATE netevolve_core)
@@ -63,3 +65,9 @@ add_test(NAME cli_unknown_option COMMAND netevolve simulate --model ${EX}/brusse
 set_tests_properties(cli_unknown_option PROPERTIES WILL_FAIL TRUE)
 add_test(NAME cli_bad_model COMMAND netevolve fitness --model ${EX}/default.cfg)
 set_tests_properties(cli_bad_model PROPERTIES WILL_FAIL TRUE)
+
+# --- evolve command (M5): tiny run end to end ------------------------------
+file(WRITE "${CMAKE_BINARY_DIR}/cli_small.cfg" "population = 10\ngenerations = 2\nseed = 3\n")
+add_test(NAME cli_evolve COMMAND netevolve evolve --config ${CMAKE_BINARY_DIR}/cli_small.cfg
+                                                  --out ${CMAKE_BINARY_DIR}/cli_evolve_out)
+set_tests_properties(cli_evolve PROPERTIES PASS_REGULAR_EXPRESSION "best fitness [0-9.e-]+ .generation [0-9]+")

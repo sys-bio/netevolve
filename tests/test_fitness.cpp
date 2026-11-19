@@ -162,6 +162,34 @@ TEST_CASE("a network that blows up has fitness exactly 0") {
     CHECK(oscillation_fitness(net, fitness_params(Config{})) == 0.0);
 }
 
+TEST_CASE("integrator noise around zero is not an oscillation") {
+    // Found during M5: a random network in which nothing produces S2, so S2
+    // decays to ~0 and then jitters at the 1e-9 level. Before the absolute
+    // amplitude floor this scored a perfect 1.0.
+    const Network net = parse_antimony(
+        "const X0, X1;\n"
+        "J0: S3 + X1 -> S0 + S0; k0*S3*X1;\n"
+        "J1: S0 + S2 -> S3; k1*S0*S2;\n"
+        "J2: S2 + S3 -> S1 + X1; k2*S2*S3;\n"
+        "J3: S2 + X1 -> X0 + X1; k3*S2*X1;\n"
+        "J4: S2 -> S1 + X0; k4*S2;\n"
+        "J5: X0 + X0 -> S0 + X0; k5*X0*X0;\n"
+        "k0 = 0.17457805103950375; k1 = 0.1185337363411992; k2 = 2.1633076150978705; k3 = 0.030354211136767922; "
+        "k4 = 0.012140261307771828; k5 = 0.10919957822863836;\n"
+        "S0 = 1; S1 = 1; S2 = 1; S3 = 1;\n"
+        "X0 = 1; X1 = 1;\n");
+    const FitnessReport r = evaluate_oscillation(net, fitness_params(Config{}));
+    REQUIRE(r.status == SimStatus::Ok);
+    CHECK(r.species[2].n_pairs == 0);
+    CHECK(r.fitness == 0.0);
+
+    // The same holds for a synthetic signal: tiny noise around a decayed value.
+    Rng rng(4);
+    std::vector<double> y(1000);
+    for (double& v : y) v = 1e-9 * rng.uniform(-1.0, 1.0);
+    CHECK(signal_score(y, kDefaults).score == 0.0);
+}
+
 TEST_CASE("fitness respects n_target and transient_fraction") {
     const auto y = sample([](double t) { return 2 + std::sin(t); }, 20 * kPi, 2000);
     OscillationParams p;

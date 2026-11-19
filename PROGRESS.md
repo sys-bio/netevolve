@@ -2,9 +2,48 @@
 
 ## Current milestone
 
-**M4 (fitness function) is complete.** It's waiting for the human's approval before M5 starts.
+**M5 (mutation and the evolutionary loop) is complete.** It's waiting for the human's approval before M6 starts.
 
 Remote: https://github.com/zyrrron/netevolve (private), branch `main`.
+
+## M5: Mutation and the evolutionary loop
+
+Done (`src/evolve.hpp/.cpp`, CLI `evolve`):
+- **Mutation operators:**
+  - Rate: k × exp(σ·N(0,1)), clamped to [k_min, k_max].
+  - Add: a random reaction with log-uniform k, refused at r_max.
+  - Delete: refused at r_min.
+  - Rewire: one molecule slot moves to a different species, keeping the reaction type.
+  - `choose_mutation` picks the operator with probabilities p_rate : p_add : p_delete : p_rewire.
+  - `make_child` makes up to 10 attempts, choosing the kind afresh each time, then falls back to copying the parent.
+- **Generation loop (`evolve`):**
+  - Generation 0 is the random initial population, followed by `generations` more, stopping early at `target_fitness`.
+  - Each generation: evaluate, stable-sort (best first), log, record any improvement, then build the next generation from the elites plus children of parents drawn uniformly from the top `parent_fraction`.
+  - Elites keep their cached fitness, which is safe because evaluation is pure.
+  - Fitness is passed in as a function, so the toy test runs the loop without the ODE machinery.
+- **`run_evolve_command`:** writes `run.cfg`, `log.csv` (flushed every generation), `best_genNNNN.ant` on every improvement, `best_final.ant` and `best_final.csv`. CLI: `evolve --config FILE [--seed N] [--out DIR]`.
+
+Tests (Release): **8/8 CTest tests passed. Doctest: 56/56 cases and 1,575,544 assertions passed.**
+- Each of the four operators, applied 10,000 times to random networks, always gives a valid network with k in range. A refused mutation leaves the network unchanged. Applied rates: Rate 100%, Add 76%, Delete 90%, Rewire 85%.
+- `make_child` gives valid children 10,000 times out of 10,000, and more than 99% of them differ from their parent.
+- Operator details: Add and Delete change R by ±1, and Rewire keeps every reaction's type. Add is refused at r_max and Delete at r_min.
+- Rate mutation with σ = 3 for 10,000 steps keeps k in [k_min, k_max], reaching both bounds.
+- Mutation kinds are chosen in the configured proportions (200,000 draws).
+- **Toy fitness** (exactly 7 reactions, starting from 3): solved at generation 5, well within the limit of 50.
+- **Elitism:** best fitness never decreases, both with the oscillation fitness and with a bumpy toy fitness over 60 generations.
+- **Determinism:**
+  - Two `evolve` runs with the same seed give byte-identical `log.csv`, `best_final.ant` and `best_final.csv`. A different seed gives a different best network.
+  - With a fitness that varies, log rows are identical for the same seed and differ for another seed.
+- **Output files:** `log.csv` has the header plus one row per generation. `run.cfg` re-reads to the same config. `best_final.ant` loads back as the best network. `best_gen0000.ant` and the best generation's file both exist.
+- **CLI (CTest):** a tiny `evolve` run finishes and reports the best fitness.
+
+**Two defects found while checking M5 results.** Both made random networks score a perfect 1.0 without oscillating:
+1. **Integrator noise near zero.** A species with no production decays to about 0 and then jitters at the 1e-9 level. A threshold relative to mean|y| (~1e-11) counted that as a sustained oscillation. Fix: an absolute floor on the peak-trough difference, `min_abs_amplitude = 1e-6`, applied as `max(min_rel_amplitude × mean|y|, 1e-6)`. Regression test in `test_fitness.cpp`.
+2. **RODAS3 dense output overshoot.** For a very stiff, quasi-steady species (relaxation rate ~4e4), cubic Hermite interpolation between large Rosenbrock steps overshot by about 1e-6, creating fake oscillations. Fix: RODAS3 no longer interpolates; it shortens steps to land exactly on sample times, and the controller keeps its preferred step size. Regression test in `test_integrator.cpp`: S3 stays within 1% of its quasi-steady value and decreases monotonically. Every M3 test still passes. RODAS3 step counts went up: Robertson 422 → 1,326, Brusselator (t = 200, 20,001 samples) 11,610 → 23,635. Both are within the budget of 50,000.
+
+**Fitness landscape, a risk for M7.** With both fixes in, random networks rarely score above 0. Among 20,000 random networks (default shape), the mean fitness is 4e-5 to 1e-4, and the best are 0.25 and 0.34: genuine damped oscillators. A 30-generation run with population 200 (seed 1) stayed at 0 throughout. The spec's fitness gives no gradient until some species shows at least one large peak-trough pair after t = 50. M7 will tell whether the default 200 × 500 search finds oscillators. If not, the spec says to report the curves and propose parameter changes, not to tune the tests.
+
+**Speed:** about 1,260 fitness evaluations per second on one thread (20,000 networks in 15.8 s).
 
 ## M4: Fitness function
 
@@ -138,6 +177,16 @@ Tests (Release): **3/3 CTest tests passed. Doctest: 11/11 cases and 775,806 asse
 - **`simulate` on failure:** it writes the samples computed so far, prints a warning and exits with 1.
 - **`evolve` and `prune`:** they print "not implemented yet" and exit with 1 until M5 and M7.
 
+### M5
+- **Generation count:** generation 0 is the random initial population, and `generations = G` gives up to G+1 evaluated generations, so G+1 rows in `log.csv`. "Solved within 50 generations" is checked as generation index ≤ 50.
+- **Elite count:** `round(elite_fraction × P)`, at least 1 if elite_fraction > 0, and at most P−1. Parent pool: `round(parent_fraction × P)`, clamped to [1, P].
+- **Child validity:** "retry mutation (bounded attempts) or recopy" means up to 10 attempts, each with a freshly chosen kind, then an unchanged copy of the parent.
+- **Rewire:** chooses a molecule slot uniformly over all reactant and product molecules of a uniformly chosen reaction, and replaces it with a uniformly chosen *different* species.
+- **Absolute amplitude floor (1e-6):** a deliberate addition to SPEC §1.4. It's a constant in `OscillationParams`, not a config key, because SPEC §2 fixes the key list. It's cheap to change or remove.
+- **RODAS3 sampling:** steps land exactly on every sample time. This caps the RODAS3 step at the sample spacing (0.1 by default), so a stiff simulation takes at least `n_points` steps.
+- **`threads`:** ignored until M6, so M5 is single-threaded.
+
 ## Open issues
 
-- None.
+- **M7 risk:** the oscillation fitness landscape is very flat for random 4-species networks (see the M5 notes). Watch the M7 acceptance run.
+

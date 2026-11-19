@@ -13,7 +13,7 @@ It's written in C++20 and uses only the standard library. Tests use [doctest](ht
 | M2 | ODE model and analytic Jacobian | done |
 | M3 | Integrators (RK45, RODAS3) | done |
 | M4 | Oscillation fitness; `simulate` and `fitness` commands | done |
-| M5 | Mutation and evolutionary loop; `evolve` command | not started |
+| M5 | Mutation and evolutionary loop; `evolve` command | done |
 | M6 | Parallel evaluation | not started |
 | M7 | `prune`, long-run check, acceptance test | not started |
 
@@ -41,7 +41,25 @@ netevolve prune    --model FILE.ant [--config FILE] [--out FILE.ant]
 netevolve --version
 ```
 
-`evolve` and `prune` arrive in M5 and M7.
+`prune` arrives in M7.
+
+### Run an evolution
+
+```bash
+netevolve evolve --config examples/default.cfg --seed 1 --out runs/seed1
+```
+
+Flags override the config file. Progress is printed once per generation. The output directory then contains:
+
+| File | Contents |
+|---|---|
+| `log.csv` | `generation,best,mean,median,best_reactions`, one row per generation (generation 0 is the random initial population) |
+| `best_genNNNN.ant` | the best network, written whenever the best fitness improves |
+| `best_final.ant` | the best network at the end of the run |
+| `best_final.csv` | time course of the best network (`t_end`, `n_points` from the config) |
+| `run.cfg` | the fully resolved config, including the seed used |
+
+A run stops after `generations` generations, or earlier once the best fitness reaches `target_fitness`. The same seed and config give byte-identical outputs.
 
 ### Simulate a model
 
@@ -73,9 +91,17 @@ Exit codes: 0 for success, 1 for a runtime error (for example a bad model file, 
 
 **Simulation.** The tool integrates ds/dt = N·v(s) with adaptive Dormand–Prince RK45. If RK45 detects stiffness or runs out of steps, it switches to RODAS3, an L-stable Rosenbrock method that uses the analytic Jacobian. A simulation fails if it exceeds its step budget or wall-clock limit, if a concentration rises above `max_conc` or falls below −1e-8, or if a value becomes non-finite.
 
+**Evolution.** Each generation is evaluated and sorted by fitness. The top `elite_fraction` are kept unchanged. The rest of the next generation are children of parents drawn uniformly from the top `parent_fraction`. Each child gets exactly one mutation:
+- a rate-constant change, k × exp(σ·N(0,1)), clamped to [k_min, k_max];
+- adding a random reaction;
+- deleting a reaction;
+- rewiring one participant to another species.
+
+The chances follow `p_rate : p_add : p_delete : p_rewire`. If a mutation would make the network invalid, it's retried up to 10 times; after that the child is a copy of its parent. Every random draw comes from one `mt19937_64` seeded with `seed`.
+
 **Oscillation fitness.** This follows SPEC §1.4:
 1. Discard the first `transient_fraction` of the samples.
-2. For each species, find alternating peaks and troughs that differ by more than `min_rel_amplitude × mean`.
+2. For each species, find alternating peaks and troughs that differ by more than `max(min_rel_amplitude × mean|y|, 1e-6)`. The absolute floor of 1e-6 stops integrator noise in a species that has decayed to about 0 from counting as oscillation.
 3. Count the complete pairs `n`, and compute a damping factor `d` from the first and last pair amplitudes.
 4. The species score is `min(n, n_target)/n_target × (1 − d)`. The network fitness is the best species score, in [0, 1]. A failed simulation scores 0.
 
@@ -122,7 +148,7 @@ r.plot()
 ## Repository layout
 
 ```
-src/        main.cpp, network, model, integrator, fitness, config, rng.hpp
+src/        main.cpp, network, model, integrator, fitness, evolve, config, rng.hpp
 tests/      doctest unit tests (test_*.cpp)
 examples/   example models and the default config
 docs/       SPEC.md

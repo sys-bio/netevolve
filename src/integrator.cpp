@@ -313,7 +313,7 @@ SimStatus run_rk45(Run& run, bool stop_on_stiff) {
 // ---------------------------------------------------------------------------
 // RODAS3 (Sandu et al., Atmos. Environ. 31:3459, 1997), in the formulation
 // used by KPP. Order 3 with an embedded order-2 estimate; L-stable and
-// stiffly accurate. Dense output by cubic Hermite interpolation.
+// stiffly accurate. Steps land exactly on sample times (no interpolation).
 //
 // For each stage s:  (I/(h*gamma) - J) K_s = f(y + sum_j A_sj K_j) + sum_j (C_sj / h) K_j
 // y_new = y + sum M_s K_s,   error = sum E_s K_s.
@@ -330,7 +330,7 @@ SimStatus run_rosenbrock(Run& run) {
     constexpr int order = 3;
 
     const int n = run.n;
-    Vec f0 = run.f(run.y), f1(n);
+    Vec f0 = run.f(run.y);
     Vec Jac(static_cast<std::size_t>(n) * n), G(static_cast<std::size_t>(n) * n);
     std::vector<int> piv(n);
     std::vector<Vec> K(S, Vec(n));
@@ -339,19 +339,27 @@ SimStatus run_rosenbrock(Run& run) {
     long steps = 0;
     bool last_rejected = false;
 
+    // `h` is the step the controller wants; `hs` is the step actually taken,
+    // shortened when needed to land exactly on the next sample time.
     while (run.t < run.t_end) {
         if (steps >= run.o.max_steps) return SimStatus::StepBudget;
         if (run.out_of_time()) return SimStatus::WallClock;
         if (run.step_too_small(h)) return SimStatus::StepTooSmall;
-        h = run.clamp_step(h);
+        const double target = run.sample_t[run.next];  // next sample, > t
+        double hs = h;
+        bool to_sample = false;
+        if (run.t + hs >= target || run.t + 1.01 * hs > target) {
+            hs = target - run.t;
+            to_sample = true;
+        }
         const auto& y = run.y;
 
         jacobian(run.m, y, Jac);
         for (std::size_t i = 0; i < G.size(); ++i) G[i] = -Jac[i];
-        for (int i = 0; i < n; ++i) G[static_cast<std::size_t>(i) * n + i] += 1.0 / (h * gamma);
+        for (int i = 0; i < n; ++i) G[static_cast<std::size_t>(i) * n + i] += 1.0 / (hs * gamma);
         if (!lu_factor(G, n, piv)) {
             ++run.res.rejected;
-            h *= 0.5;
+            h = hs * 0.5;
             last_rejected = true;
             continue;
         }
@@ -369,7 +377,7 @@ SimStatus run_rosenbrock(Run& run) {
                 rhs(run.m, ytmp, ftmp);
                 for (int i = 0; i < n; ++i) {
                     double acc = ftmp[i];
-                    for (int j = 0; j < s; ++j) acc += (C[off + j] / h) * K[j][i];
+                    for (int j = 0; j < s; ++j) acc += (C[off + j] / hs) * K[j][i];
                     K[s][i] = acc;
                 }
             }
@@ -388,42 +396,31 @@ SimStatus run_rosenbrock(Run& run) {
         const double en = run.err_norm(err, y, ynew);
         if (en > 1.0) {
             ++run.res.rejected;
-            h *= std::max(kFacMin, kFacSafe * std::pow(en, -1.0 / order));
+            h = hs * std::max(kFacMin, kFacSafe * std::pow(en, -1.0 / order));
             last_rejected = true;
             continue;
         }
 
         ++steps;
         ++run.res.steps;
-        rhs(run.m, ynew, f1);
-
-        // Cubic Hermite dense output for the samples inside (t, t + h].
-        const double t_old = run.t;
-        const double t_new = (run.t + h >= run.t_end) ? run.t_end : run.t + h;
-        while (run.next < static_cast<int>(run.sample_t.size()) && run.sample_t[run.next] <= t_new) {
-            const double ts = run.sample_t[run.next];
-            SimStatus st;
-            if (ts == t_new) {
-                st = run.emit(ynew);
-            } else {
-                const double th = (ts - t_old) / h, th2 = th * th, th3 = th2 * th;
-                const double h00 = 2 * th3 - 3 * th2 + 1, h10 = th3 - 2 * th2 + th;
-                const double h01 = -2 * th3 + 3 * th2, h11 = th3 - th2;
-                for (int i = 0; i < n; ++i)
-                    ytmp[i] = h00 * y[i] + h10 * h * f0[i] + h01 * ynew[i] + h11 * h * f1[i];
-                st = run.emit(ytmp);
-            }
-            if (st != SimStatus::Ok) return st;
-        }
         if (const SimStatus st = run.check(ynew); st != SimStatus::Ok) return st;
 
-        run.t = t_new;
+        // No interpolation: samples are taken only at step ends. (A Hermite
+        // interpolant uses h * f at both ends, and for stiff components f is
+        // lambda times the local error, which made it overshoot by far more
+        // than the tolerance.)
+        run.t = to_sample ? target : run.t + hs;
         run.y = ynew;
-        f0 = f1;
+        if (to_sample)
+            if (const SimStatus st = run.emit(ynew); st != SimStatus::Ok) return st;
+        rhs(run.m, ynew, f0);
+
         double fac = kFacSafe * std::pow(std::max(en, 1e-10), -1.0 / order);
         fac = std::min(kFacMax, std::max(kFacMin, fac));
         if (last_rejected) fac = std::min(fac, 1.0);
-        h *= fac;
+        // A step shortened to hit a sample says nothing against the longer
+        // step the controller wanted, unless the error asks for a smaller one.
+        h = (to_sample && fac >= 1.0) ? std::max(h, hs * fac) : hs * fac;
         last_rejected = false;
     }
     return SimStatus::Ok;

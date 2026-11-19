@@ -218,6 +218,37 @@ TEST_CASE("step budget and wall-clock guards stop a simulation") {
     }
 }
 
+TEST_CASE("stiff quasi-steady species: Rosenbrock samples do not overshoot") {
+    // Found during M5. dS3/dt = k2*X1 - k3*S1*S3 relaxes at rate ~k3*S1 ~ 4e4
+    // onto its quasi-steady value k2*X1/(k3*S1), which declines smoothly as S1
+    // grows linearly. Cubic Hermite dense output turned this into spurious
+    // oscillations of ~1e-6 (fitness 1.0 for a non-oscillating network).
+    const Network net = parse_antimony(
+        "const X0, X1;\n"
+        "J0: X1 -> S1; k0*X1;\n"
+        "J1: X0 -> S0 + X0; k1*X0;\n"
+        "J2: X1 -> S3; k2*X1;\n"
+        "J3: S1 + S3 -> S0 + S2; k3*S1*S3;\n"
+        "J4: S0 + X1 -> X0; k4*S0*X1;\n"
+        "J5: S0 + S3 -> S3 + X0; k5*S0*S3;\n"
+        "k0 = 8.252664554556926; k1 = 0.023360102852485538; k2 = 0.09976968186966347; k3 = 50.44104264115237; "
+        "k4 = 0.2525921537647396; k5 = 0.672908797472974;\n"
+        "S0 = 1; S1 = 1; S2 = 1; S3 = 1;\n"
+        "X0 = 1; X1 = 1;\n");
+    for (Method method : {Method::Rosenbrock, Method::Auto}) {
+        CAPTURE(name(method));
+        const SimResult r = run(net, 100.0, 1000, with(method));
+        REQUIRE_MESSAGE(r.ok(), to_string(r.status));
+        // Over the second half, S3 tracks k2/(k3*S1) closely and decreases.
+        for (int i = 500; i < r.n_samples(); ++i) {
+            const double qss = 0.09976968186966347 / (50.44104264115237 * r.at(i, 1));
+            REQUIRE_MESSAGE(std::abs(r.at(i, 3) - qss) < 0.01 * qss, "t = " << r.t[i] << ", S3 = " << r.at(i, 3)
+                                                                             << ", quasi-steady " << qss);
+            if (i > 500) REQUIRE(r.at(i, 3) <= r.at(i - 1, 3) * (1 + 1e-6));
+        }
+    }
+}
+
 TEST_CASE("simulation is deterministic") {
     const Network net = load_antimony_file(NETEVOLVE_EXAMPLES_DIR "/brusselator.ant");
     const SimResult a = run(net, 50.0, 501, with(Method::Auto));

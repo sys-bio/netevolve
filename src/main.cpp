@@ -9,6 +9,7 @@
 #include <string_view>
 
 #include "config.hpp"
+#include "evolve.hpp"
 #include "fitness.hpp"
 #include "integrator.hpp"
 #include "model.hpp"
@@ -106,6 +107,23 @@ int cmd_fitness(int argc, char** argv) {
     return 0;
 }
 
+int cmd_evolve(int argc, char** argv) {
+    const auto f = parse_flags(argc, argv, {"--config", "--seed", "--out"});
+    ne::Config cfg = ne::load_config_file(require_flag(f, "--config"));
+    if (f.count("--seed")) cfg.seed = flag_number<std::uint64_t>("--seed", f.at("--seed"));
+    if (f.count("--out")) {
+        if (f.at("--out").empty()) throw UsageError("--out must not be empty");
+        cfg.output_dir = f.at("--out");
+    }
+    ne::validate_config(cfg);
+    std::cout << "netevolve evolve: seed " << cfg.seed << ", population " << cfg.population << ", generations "
+              << cfg.generations << ", output " << cfg.output_dir << "\n";
+    const ne::EvolutionResult res = ne::run_evolve_command(cfg, &std::cout);
+    std::cout << "best fitness " << res.best_fitness << " (generation " << res.best_generation << ", "
+              << res.best.reactions.size() << " reactions)\n";
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -125,7 +143,8 @@ int main(int argc, char** argv) {
         }
         if (cmd == "simulate") return cmd_simulate(argc, argv);
         if (cmd == "fitness") return cmd_fitness(argc, argv);
-        if (cmd == "evolve" || cmd == "prune") {
+        if (cmd == "evolve") return cmd_evolve(argc, argv);
+        if (cmd == "prune") {
             std::cerr << "error: '" << cmd << "' is not implemented yet\n";
             return 1;
         }
