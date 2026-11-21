@@ -2,6 +2,7 @@
 // (SPEC §1.3), plus the file outputs of the `evolve` command (SPEC §2).
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <iosfwd>
 #include <string>
@@ -75,6 +76,26 @@ EvolutionResult run_evolve_command(const Config& cfg, std::ostream* log = nullpt
 
 // One log.csv data row, without the trailing newline.
 std::string log_row(const GenerationStats& s);
+
+// --- Multiple trials (`evolve --numtrials N`) --------------------------------
+
+// Seeds for n independent trials. One mt19937_64 is seeded once with `seed`;
+// trial i (1-based) uses its i-th output. So a single seed fixes the whole
+// batch, and any one trial can be rerun alone with its own seed.
+std::vector<std::uint64_t> trial_seeds(std::uint64_t seed, int n);
+
+struct TrialSummary {
+    int trial = 0;           // 1-based
+    std::uint64_t seed = 0;  // the seed this trial ran with
+    EvolutionResult result;
+    bool long_run_passed = false;
+};
+
+// Runs n independent trials of the evolve command. Trial i writes the usual
+// outputs into cfg.output_dir/trial<i> (its run.cfg holds its own seed), and
+// cfg.output_dir/summary.csv gets one row per trial. Progress goes to `log`
+// if non-null.
+std::vector<TrialSummary> run_trials_command(const Config& cfg, int n, std::ostream* log = nullptr);
 
 // --- Pruning (SPEC M7) ------------------------------------------------------
 

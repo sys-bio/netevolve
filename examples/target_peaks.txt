@@ -1,0 +1,15 @@
+# Example target for objective = timeseries: alternating troughs and peaks.
+# Taken from S0 of examples/brusselator.ant (A = 1, B = 3), so an exact match
+# exists. Columns: time, concentration.
+time    concentration
+1.615   0.3132
+6.828   3.7682
+10.235  0.3705
+13.989  3.7517
+17.392  0.3706
+21.146  3.7517
+24.549  0.3706
+28.303  3.7518
+31.706  0.3706
+35.460  3.7517
+38.863  0.3706

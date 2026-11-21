@@ -59,4 +59,19 @@ TEST_CASE("config validation catches inconsistent values") {
     c = Config{};
     c.p_rate = c.p_add = c.p_delete = c.p_rewire = 0;
     CHECK_THROWS_AS(validate_config(c), ConfigError);
+    c = Config{};
+    c.recheck_threshold = -1;
+    CHECK_THROWS_AS(validate_config(c), ConfigError);
+    c = Config{};
+    c.recheck_rtol = 0;
+    CHECK_THROWS_AS(validate_config(c), ConfigError);
+    c = Config{};
+    c.solver = "lsoda";  // not a known solver
+    CHECK_THROWS_AS(validate_config(c), ConfigError);
+    c = Config{};
+    c.max_steps = 0;
+    CHECK_THROWS_AS(validate_config(c), ConfigError);
+    c = Config{};
+    c.solver = "rk45";
+    CHECK_NOTHROW(validate_config(c));
 }

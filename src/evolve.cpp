@@ -335,13 +335,62 @@ EvolutionResult run_evolve_command(const Config& cfg, std::ostream* log) {
         write_text(dir / name, write_antimony(best, ant_header(gen, f)));
     };
 
-    EvolutionResult res = evolve(cfg, [&](const Network& n) { return oscillation_fitness(n, fp); }, cb);
+    EvolutionResult res = evolve(cfg, [&](const Network& n) { return network_fitness(n, fp); }, cb);
     log_csv.close();
 
     write_text(dir / "best_final.ant", write_antimony(res.best, ant_header(res.best_generation, res.best_fitness)));
     const SimResult sim = simulate(make_model(res.best), res.best.init, fp.t_end, fp.n_points, fp.solver);
     write_text(dir / "best_final.csv", simulation_csv(sim, res.best));
     return res;
+}
+
+std::vector<std::uint64_t> trial_seeds(std::uint64_t seed, int n) {
+    std::mt19937_64 master(seed);
+    std::vector<std::uint64_t> seeds;
+    for (int i = 0; i < n; ++i) seeds.push_back(master());
+    return seeds;
+}
+
+std::vector<TrialSummary> run_trials_command(const Config& cfg, int n, std::ostream* log) {
+    validate_config(cfg);
+    if (n < 1) throw std::invalid_argument("number of trials must be >= 1");
+    namespace fs = std::filesystem;
+    const fs::path base(cfg.output_dir);
+    fs::create_directories(base);
+    const FitnessParams fp = fitness_params(cfg);
+
+    std::ofstream summary(base / "summary.csv", std::ios::binary);
+    if (!summary) throw std::runtime_error("cannot write '" + (base / "summary.csv").string() + "'");
+    summary << "trial,seed,best_fitness,best_generation,reactions,evaluations,long_run\n";
+
+    const std::vector<std::uint64_t> seeds = trial_seeds(cfg.seed, n);
+    std::vector<TrialSummary> out;
+    for (int i = 1; i <= n; ++i) {
+        Config tc = cfg;
+        tc.seed = seeds[static_cast<std::size_t>(i - 1)];
+        tc.output_dir = (base / ("trial" + std::to_string(i))).string();
+        if (log) *log << "=== trial " << i << " of " << n << ", seed " << tc.seed << ", output " << tc.output_dir
+                      << " ===\n";
+
+        TrialSummary t;
+        t.trial = i;
+        t.seed = tc.seed;
+        t.result = run_evolve_command(tc, log);
+        // The long-run check is about sustained oscillation; it doesn't apply
+        // to the time-series objective.
+        const bool osc = fp.objective == Objective::Oscillation;
+        t.long_run_passed = osc && long_run_check(t.result.best, fp).passed;
+        const char* lr = !osc ? "n/a" : t.long_run_passed ? "passed" : "failed";
+
+        summary << i << "," << tc.seed << "," << fmt(t.result.best_fitness) << "," << t.result.best_generation
+                << "," << t.result.best.reactions.size() << "," << t.result.n_evaluations << "," << lr << "\n";
+        summary.flush();
+        if (log) *log << "trial " << i << ": best fitness " << t.result.best_fitness << " (generation "
+                      << t.result.best_generation << ", " << t.result.best.reactions.size()
+                      << " reactions), long-run check " << (t.long_run_passed || !osc ? lr : "FAILED") << "\n";
+        out.push_back(std::move(t));
+    }
+    return out;
 }
 
 }  // namespace ne

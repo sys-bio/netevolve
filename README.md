@@ -2,7 +2,7 @@
 
 NetEvolve is a command-line tool that evolves mass-action biochemical reaction networks toward a target behaviour. The first target is sustained oscillation. The algorithm follows Deckard & Sauro (2004, *ChemBioChem* 5:1423) and Paladugu et al. (2006, *IEE Proc. Syst. Biol.* 153:223).
 
-It's written in C++20 and uses only the standard library. Tests use [doctest](https://github.com/doctest/doctest), which is vendored. The full specification is in [docs/SPEC.md](docs/SPEC.md).
+It's written in C++20. The default ODE solver is CVODE from [SUNDIALS](https://computing.llnl.gov/projects/sundials) 5.x, linked statically. Everything else uses only the standard library, and the in-house solvers let you build without SUNDIALS (see Building). Tests use [doctest](https://github.com/doctest/doctest), which is vendored. The full specification is in [docs/SPEC.md](docs/SPEC.md).
 
 ## Status
 
@@ -21,7 +21,7 @@ Details and test results for each milestone are in [PROGRESS.md](PROGRESS.md).
 
 ## Building
 
-You need Windows x64, Visual Studio 2022 (MSVC v143) and CMake 3.20 or later. From the repo root:
+You need Windows x64, Visual Studio 2022 (MSVC v143), CMake 3.20 or later (3.28+ recommended), and internet access the first time you configure. From the repo root:
 
 ```bash
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
@@ -29,12 +29,30 @@ cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-If `cmake` isn't on your PATH, use the copy installed with CMake (`C:\Program Files\CMake\bin\cmake.exe`) or the one bundled with Visual Studio. The executable is `build/Release/netevolve.exe`.
+The executable is `build/Release/netevolve.exe`. If `cmake` isn't on your PATH, use the copy installed with CMake (`C:\Program Files\CMake\bin\cmake.exe`) or the one bundled with Visual Studio.
+
+### SUNDIALS (CVODE)
+
+NetEvolve's default ODE solver is CVODE from SUNDIALS 5.x. You don't need to install it: CMake looks for SUNDIALS in this order.
+
+1. **An existing install.** If you already have SUNDIALS 5.x, for example from the libRoadRunner dependencies, point CMake at it. It must be static libraries built with the release DLL runtime (`/MD`):
+   ```bash
+   cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DSUNDIALS_DIR=<install>/lib/cmake/sundials
+   ```
+2. **Automatic download (the default).** Otherwise, the first configure downloads the official [SUNDIALS 5.7.0 release](https://github.com/LLNL/sundials/releases/tag/v5.7.0) from GitHub and checks its SHA-256 hash. It then builds only CVODE, as static libraries, inside the build folder (`build/sd-src`, `build/sd`). This adds about 15 s to the first configure and about 30 s to the first build. Later builds reuse it, and nothing is installed outside the build folder. The result is byte-for-byte identical to using a separately installed SUNDIALS 5.7.0. To forbid the download, pass `-DNETEVOLVE_FETCH_SUNDIALS=OFF`; configuration then stops with instructions if no install is found.
+3. **No SUNDIALS.** `-DNETEVOLVE_WITH_CVODE=OFF` builds without CVODE. The default solver is then the in-house `auto` (RK45 + Rosenbrock), which is about 2.5× slower and less robust and gives different results.
+
+`netevolve --version` shows which solvers a binary has. CMake prints which SUNDIALS it used, for example `CVODE solver enabled: SUNDIALS 5.7.0 downloaded and built in .../build/sd`.
+
+Notes:
+- **Keep the build path short.** SUNDIALS' build has deeply nested folders, and Visual Studio's build logs can exceed Windows' 260-character path limit if the repo sits deep in a folder tree. If you get `FileTracker : error FTK1011 ... could not create the new file tracking log file`, move the repo to a shorter path, or use a short build folder such as `-B C:/nb`.
+- **Old build folders.** A build folder configured before CVODE became the default (or with `-DNETEVOLVE_WITH_CVODE=OFF`) keeps that setting cached. Pass `-DNETEVOLVE_WITH_CVODE=ON` once when you reconfigure it, or start a new build folder.
+- **Offline builds.** To build offline, download `sundials-5.7.0.tar.gz` once and pass `-DFETCHCONTENT_SOURCE_DIR_SUNDIALS=<extracted sundials-5.7.0 folder>`, or install SUNDIALS and use `SUNDIALS_DIR`.
 
 ## Usage
 
 ```
-netevolve evolve   --config FILE [--seed N] [--out DIR]
+netevolve evolve   --config FILE [--seed N] [--out DIR] [--numtrials N]
 netevolve simulate --model FILE.ant [--t-end T] [--points N] [--csv OUT.csv]
 netevolve fitness  --model FILE.ant [--config FILE]
 netevolve prune    --model FILE.ant [--config FILE] [--out FILE.ant]
@@ -60,7 +78,15 @@ Flags override the config file. Progress is printed once per generation. The out
 
 A run stops after `generations` generations, or earlier once the best fitness reaches `target_fitness`. The same seed and config give byte-identical outputs, whatever the thread count.
 
-Fitness evaluation runs on `threads` threads (0 means all cores). On the development machine, an 8-thread laptop CPU, the default config evaluates about 1,450 networks per second on one thread and about 9,000 per second on 8, so a full 500-generation default run takes roughly 10–15 seconds.
+Fitness evaluation runs on `threads` threads (0 means all cores). On the development machine, an 8-thread laptop CPU, the in-house `auto` solver evaluates about 1,450 networks per second on one thread and about 9,000 per second on 8, so a full 500-generation run takes roughly 10–15 seconds. CVODE, the default, is about 2.5× faster per evaluation (measured on a different machine).
+
+### Run several independent trials
+
+```bash
+netevolve evolve --config examples/default.cfg --seed 1 --numtrials 50 --out runs/batch
+```
+
+`--numtrials N` runs N independent evolutions in one command. The seed is set once: it seeds a master `mt19937_64`, and trial i runs with that generator's i-th output as its seed. Trial i writes the usual outputs to `runs/batch/trial<i>/`, and its `run.cfg` records its own seed, so any trial can be rerun alone with `--seed`. `runs/batch/summary.csv` has one row per trial: `trial,seed,best_fitness,best_generation,reactions,evaluations,long_run`. Without `--numtrials`, `evolve` runs a single trial exactly as before.
 
 ### Prune a network
 
@@ -97,8 +123,25 @@ netevolve fitness --model examples/brusselator.ant --config examples/default.cfg
 status: ok
 S0: pairs 7, damping 0.000376191, score 0.999624
 S1: pairs 6, damping 0.000955597, score 0.999044
-fitness 0.999624
+re-check (rtol 1e-10, atol 1e-14): status ok, score 0.999621
+fitness 0.999621
 ```
+
+The per-species scores come from the default-tolerance simulation. The `re-check` line appears when that score reaches `recheck_threshold`. The final `fitness` is the value used for selection and pruning.
+
+### Evolve toward a time series
+
+Instead of oscillation, the target can be a time series read from a text file. Set `objective = timeseries` and `target_file` in the config ([examples/timeseries.cfg](examples/timeseries.cfg)):
+
+```bash
+netevolve evolve --config examples/timeseries.cfg --seed 1 --numtrials 10 --out runs/ts
+```
+
+The target file has two columns, time and concentration, separated by spaces, tabs or a comma. `#` starts a comment, and one text header line is allowed. Times must be strictly increasing. Alternating peak and trough values at the times they should occur work well. [examples/target_peaks.txt](examples/target_peaks.txt) has the troughs and peaks of the Brusselator's S0. A relative `target_file` is relative to the config file. It is stored as an absolute path in each run's `run.cfg`.
+
+Each network is simulated from t = 0, with every species starting at its initial value (1 for evolved networks), and sampled at exactly the target times. For each species, the error is the RMS difference from the targets divided by the mean |target| (NRMSE), and the score is 1 / (1 + NRMSE). That gives 1 for a perfect match, about 0.91 for a 10% error and 0.5 for a 100% error. The network's fitness is its best-matching species. The target doesn't say which species, so evolution may use any of them. The tight-tolerance re-check, `prune` and `--numtrials` work as for oscillation. The long-run check is specific to oscillation and is reported as n/a. `netevolve fitness --config examples/timeseries.cfg --model M.ant` prints each species' NRMSE.
+
+Only the values at the target times are scored. A network can pass through a "peak" value without having a maximum there, so dense targets (for example including points between the peaks and troughs) constrain the shape more tightly.
 
 Exit codes: 0 for success, 1 for a runtime error (for example a bad model file, or a simulation that failed in `simulate`), and 2 for command-line misuse.
 
@@ -106,7 +149,12 @@ Exit codes: 0 for success, 1 for a runtime error (for example a bad model file, 
 
 **Networks.** A network has `F` floating species `S0..S(F-1)`, `B` boundary species `X0..X(B-1)` held at fixed concentrations, and irreversible mass-action reactions. Evolution generates four reaction types: A → P, A → P + Q, A + B → P and A + B → P + Q. The ODE engine handles any integer stoichiometry.
 
-**Simulation.** The tool integrates ds/dt = N·v(s) with adaptive Dormand–Prince RK45. If RK45 detects stiffness or runs out of steps, it switches to RODAS3, an L-stable Rosenbrock method that uses the analytic Jacobian. A simulation fails if it exceeds its step budget or wall-clock limit, if a concentration rises above `max_conc` or falls below −1e-8, or if a value becomes non-finite.
+**Simulation.** The tool integrates ds/dt = N·v(s). The solver is set by the `solver` config key:
+- `cvode` (the default): SUNDIALS CVODE, variable-order BDF with the analytic Jacobian and a dense linear solver. It runs one internal step at a time, so the guards below are checked after every step. Samples are interpolated with CVODE's dense output.
+- `auto`: the in-house adaptive Dormand–Prince RK45. If RK45 detects stiffness or runs out of steps, it switches to RODAS3, an L-stable Rosenbrock method that uses the analytic Jacobian.
+- `rk45` or `rosenbrock` alone.
+
+In a 50-trial comparison (`--seed 1 --numtrials 50`), CVODE ran in 110 s against 258 s for `auto`, about 22,000 against 8,000 evaluations per second, with the same yield (15 against 16 trials passing the long-run check). RK45 alone was 20–85× slower than `auto`. `max_steps` (default 50,000) is the step budget per simulation. A simulation fails if it exceeds its step budget or wall-clock limit, if a concentration rises above `max_conc` or falls below −1e-8, or if a value becomes non-finite.
 
 **Evolution.** Each generation is evaluated and sorted by fitness. The top `elite_fraction` are kept unchanged. The rest of the next generation are children of parents drawn uniformly from the top `parent_fraction`. Each child gets exactly one mutation:
 - a rate-constant change, k × exp(σ·N(0,1)), clamped to [k_min, k_max];
@@ -121,6 +169,8 @@ The chances follow `p_rate : p_add : p_delete : p_rewire`. If a mutation would m
 2. For each species, find alternating peaks and troughs that differ by more than `max(min_rel_amplitude × mean|y|, 1e-6)`. The absolute floor of 1e-6 stops integrator noise in a species that has decayed to about 0 from counting as oscillation.
 3. Count the complete pairs `n`, and compute a damping factor `d` from the first and last pair amplitudes.
 4. The species score is `min(n, n_target)/n_target × (1 − d)`. The network fitness is the best species score, in [0, 1]. A failed simulation scores 0.
+5. **Tight-tolerance re-check.** If the score is at least `recheck_threshold` (default 0.9), the network is simulated again with `recheck_rtol` / `recheck_atol` (defaults 1e-10 / 1e-14), and its fitness is the lower of the two scores. This applies to selection, `prune`, `fitness` and the acceptance test. Without it, evolution finds networks whose oscillation exists only because of integrator error at the default tolerance (rtol 1e-6). In a 50-trial test, 2 of 37 high-scoring winners were such artifacts and 3 more had inflated scores. CVODE (libRoadRunner) failed to integrate most of them. [examples/integrator_artifact.ant](examples/integrator_artifact.ant) is one: with `solver = auto` it scores 1 at the default tolerance and 0 at the tight one, and CVODE scores it 0 at both. The re-check stays on with CVODE. Set `recheck_threshold` above 1 to turn the re-check off.
+6. **Concentration floor.** If a species that oscillates in the scored window (at least one peak-trough pair) drops below `osc_conc_floor` (default 1e-12) there, the network's fitness is 0. This covers the whole network, not just that species, because other species can oscillate cleanly *because of* the one crashing. Such dips are physically meaningless (far below one molecule) and numerically unreliable. [examples/deep_dip.ant](examples/deep_dip.ant), an evolved network whose species fall to about 1e-22 every cycle, scored 1.0 with CVODE before the floor. Solvers disagreed on it, and RK45 and LSODA failed. Species that just decay toward 0 without oscillating don't trigger the floor. Set `osc_conc_floor = 0` to turn it off.
 
 ## Configuration
 

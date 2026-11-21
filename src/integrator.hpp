@@ -15,7 +15,12 @@ enum class Method {
     Auto,        // RK45, switching to Rosenbrock on stiffness or step budget
     RK45,        // Dormand-Prince 5(4) only
     Rosenbrock,  // RODAS3 only
+    CVODE,       // SUNDIALS CVODE, BDF with the analytic Jacobian (only if built
+                 // with NETEVOLVE_WITH_CVODE; see cvode_available())
 };
+
+// True if this build includes the optional CVODE solver.
+bool cvode_available();
 
 enum class SimStatus {
     Ok,
@@ -58,6 +63,12 @@ struct SimResult {
 // t_i = t_end * i / (n_points - 1), including both ends. n_points >= 2.
 SimResult simulate(const Model& m, std::span<const double> y0, double t_end, int n_points,
                    const SolverOptions& opts = {});
+
+// Integrates from t = 0 and samples at the given times, which must be
+// strictly increasing, >= 0, and end at a time > 0. Sample i of the result
+// is at times[i] (t = 0 is not included unless times[0] == 0).
+SimResult simulate_at(const Model& m, std::span<const double> y0, std::span<const double> times,
+                      const SolverOptions& opts = {});
 
 // Time course as CSV: header "time,S0,S1,...", then one row per sample.
 // Values are written in the shortest form that reads back exactly.

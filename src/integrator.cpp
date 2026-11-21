@@ -5,6 +5,14 @@
 #include <chrono>
 #include <cmath>
 #include <stdexcept>
+#include <string>
+
+#ifdef NETEVOLVE_HAVE_CVODE
+#include <cvode/cvode.h>
+#include <nvector/nvector_serial.h>
+#include <sunlinsol/sunlinsol_dense.h>
+#include <sunmatrix/sunmatrix_dense.h>
+#endif
 
 namespace ne {
 
@@ -426,22 +434,180 @@ SimStatus run_rosenbrock(Run& run) {
     return SimStatus::Ok;
 }
 
+// ---------------------------------------------------------------------------
+// SUNDIALS CVODE (optional): variable-order BDF with a Newton iteration, the
+// analytic Jacobian and a dense linear solver. Run one internal step at a
+// time so the guards (max_conc, min_conc, non-finite), the step budget and
+// the wall-clock limit apply after every step, as for the in-house solvers.
+// Samples are interpolated with CVODE's own dense output (CVodeGetDky).
+// ---------------------------------------------------------------------------
+
+#ifdef NETEVOLVE_HAVE_CVODE
+
+int cvode_rhs(realtype, N_Vector y, N_Vector ydot, void* user) {
+    const Model& m = *static_cast<const Model*>(user);
+    const auto n = static_cast<std::size_t>(m.n_state);
+    rhs(m, std::span<const double>(N_VGetArrayPointer(y), n), std::span<double>(N_VGetArrayPointer(ydot), n));
+    for (std::size_t i = 0; i < n; ++i)
+        if (!std::isfinite(N_VGetArrayPointer(ydot)[i])) return 1;  // recoverable: CVODE cuts the step
+    return 0;
+}
+
+int cvode_jac(realtype, N_Vector y, N_Vector, SUNMatrix J, void* user, N_Vector, N_Vector, N_Vector) {
+    const Model& m = *static_cast<const Model*>(user);
+    const int n = m.n_state;
+    thread_local Vec rowmajor;
+    rowmajor.resize(static_cast<std::size_t>(n) * n);
+    jacobian(m, std::span<const double>(N_VGetArrayPointer(y), static_cast<std::size_t>(n)), rowmajor);
+    for (int i = 0; i < n; ++i)
+        for (int l = 0; l < n; ++l) SM_ELEMENT_D(J, i, l) = rowmajor[static_cast<std::size_t>(i) * n + l];
+    return 0;
+}
+
+void cvode_silent(int, const char*, const char*, char*, void*) {}
+
+// Owns the CVODE objects for one simulation.
+struct CvodeHandles {
+    N_Vector y = nullptr, ytmp = nullptr;
+    SUNMatrix A = nullptr;
+    SUNLinearSolver LS = nullptr;
+    void* mem = nullptr;
+    ~CvodeHandles() {
+        if (mem) CVodeFree(&mem);
+        if (LS) SUNLinSolFree(LS);
+        if (A) SUNMatDestroy(A);
+        if (ytmp) N_VDestroy(ytmp);
+        if (y) N_VDestroy(y);
+    }
+};
+
+SimStatus run_cvode(Run& run) {
+    const int n = run.n;
+    CvodeHandles h;
+    h.y = N_VNew_Serial(n);
+    h.ytmp = N_VNew_Serial(n);
+    if (!h.y || !h.ytmp) throw std::runtime_error("CVODE: out of memory");
+    std::copy(run.y.begin(), run.y.end(), N_VGetArrayPointer(h.y));
+
+    h.mem = CVodeCreate(CV_BDF);
+    if (!h.mem) throw std::runtime_error("CVODE: CVodeCreate failed");
+    auto ok = [](int flag, const char* what) {
+        if (flag < 0) throw std::runtime_error(std::string("CVODE: ") + what + " failed");
+    };
+    ok(CVodeInit(h.mem, cvode_rhs, run.t, h.y), "CVodeInit");
+    ok(CVodeSetErrHandlerFn(h.mem, cvode_silent, nullptr), "CVodeSetErrHandlerFn");
+    ok(CVodeSStolerances(h.mem, run.o.rtol, run.o.atol), "CVodeSStolerances");
+    ok(CVodeSetUserData(h.mem, const_cast<Model*>(&run.m)), "CVodeSetUserData");
+    ok(CVodeSetStopTime(h.mem, run.t_end), "CVodeSetStopTime");
+    ok(CVodeSetMaxNumSteps(h.mem, run.o.max_steps), "CVodeSetMaxNumSteps");
+    h.A = SUNDenseMatrix(n, n);
+    h.LS = SUNLinSol_Dense(h.y, h.A);
+    if (!h.A || !h.LS) throw std::runtime_error("CVODE: dense linear solver setup failed");
+    ok(CVodeSetLinearSolver(h.mem, h.LS, h.A), "CVodeSetLinearSolver");
+    ok(CVodeSetJacFn(h.mem, cvode_jac), "CVodeSetJacFn");
+
+    long steps = 0;
+    const int n_samples = static_cast<int>(run.sample_t.size());
+    while (run.next < n_samples) {
+        if (steps >= run.o.max_steps) return SimStatus::StepBudget;
+        if (run.out_of_time()) return SimStatus::WallClock;
+        realtype tret = run.t;
+        const int flag = CVode(h.mem, run.t_end, h.y, &tret, CV_ONE_STEP);
+        if (flag < 0) {
+            switch (flag) {
+                case CV_TOO_MUCH_WORK: return SimStatus::StepBudget;
+                case CV_RHSFUNC_FAIL:
+                case CV_FIRST_RHSFUNC_ERR:
+                case CV_REPTD_RHSFUNC_ERR:
+                case CV_UNREC_RHSFUNC_ERR: return SimStatus::NonFinite;
+                default: return SimStatus::StepTooSmall;  // error-test / convergence failures, h underflow
+            }
+        }
+        ++steps;
+        ++run.res.steps;
+        const double* y = N_VGetArrayPointer(h.y);
+        const std::span<const double> ynow(y, static_cast<std::size_t>(n));
+
+        // Samples inside (t, tret], from CVODE's interpolating polynomial.
+        while (run.next < n_samples && run.sample_t[run.next] <= tret) {
+            const double ts = run.sample_t[run.next];
+            SimStatus st;
+            if (ts == tret) {
+                st = run.emit(ynow);
+            } else {
+                if (CVodeGetDky(h.mem, ts, 0, h.ytmp) < 0) return SimStatus::StepTooSmall;
+                st = run.emit(std::span<const double>(N_VGetArrayPointer(h.ytmp), static_cast<std::size_t>(n)));
+            }
+            if (st != SimStatus::Ok) return st;
+        }
+        if (const SimStatus st = run.check(ynow); st != SimStatus::Ok) return st;
+        run.t = tret;
+        if (tret >= run.t_end) break;
+    }
+    long fails = 0;
+    if (CVodeGetNumErrTestFails(h.mem, &fails) >= 0) run.res.rejected += fails;
+    return SimStatus::Ok;
+}
+
+#endif  // NETEVOLVE_HAVE_CVODE
+
 }  // namespace
+
+namespace {
+SimResult simulate_samples(const Model& m, std::span<const double> y0, Vec sample_t, const SolverOptions& opts);
+}  // namespace
+
+bool cvode_available() {
+#ifdef NETEVOLVE_HAVE_CVODE
+    return true;
+#else
+    return false;
+#endif
+}
 
 SimResult simulate(const Model& m, std::span<const double> y0, double t_end, int n_points, const SolverOptions& opts) {
     if (n_points < 2) throw std::invalid_argument("simulate: n_points must be >= 2");
     if (!(t_end > 0)) throw std::invalid_argument("simulate: t_end must be > 0");
+    Vec sample_t(static_cast<std::size_t>(n_points));
+    for (int i = 0; i < n_points; ++i) sample_t[i] = t_end * i / (n_points - 1);
+    sample_t.back() = t_end;
+    return simulate_samples(m, y0, std::move(sample_t), opts);
+}
+
+SimResult simulate_at(const Model& m, std::span<const double> y0, std::span<const double> times,
+                      const SolverOptions& opts) {
+    if (times.empty() || times.front() < 0 || !(times.back() > 0))
+        throw std::invalid_argument("simulate_at: times must be >= 0 and end at a time > 0");
+    for (std::size_t i = 1; i < times.size(); ++i)
+        if (!(times[i] > times[i - 1])) throw std::invalid_argument("simulate_at: times must be strictly increasing");
+    // The solvers record the initial state as the first sample, at t = 0.
+    const bool prepend = times.front() > 0;
+    Vec sample_t;
+    if (prepend) sample_t.push_back(0.0);
+    sample_t.insert(sample_t.end(), times.begin(), times.end());
+    SimResult r = simulate_samples(m, y0, std::move(sample_t), opts);
+    if (prepend && !r.t.empty()) {
+        r.t.erase(r.t.begin());
+        r.y.erase(r.y.begin(), r.y.begin() + r.n_state);
+    }
+    return r;
+}
+
+namespace {
+
+// Integrates from t = 0 to sample_t.back(), recording the state at each of
+// sample_t (sample_t[0] must be 0).
+SimResult simulate_samples(const Model& m, std::span<const double> y0, Vec sample_t, const SolverOptions& opts) {
     if (static_cast<int>(y0.size()) != m.n_state) throw std::invalid_argument("simulate: y0 has the wrong size");
+    const int n_points = static_cast<int>(sample_t.size());
+    const double t_end = sample_t.back();
 
     SimResult res;
     res.n_state = m.n_state;
     res.t.reserve(n_points);
     res.y.reserve(static_cast<std::size_t>(n_points) * m.n_state);
 
-    Run run{m, opts, res, m.n_state, t_end, {}, 0, 0.0, Vec(y0.begin(), y0.end()), Clock::now(), 0};
-    run.sample_t.resize(n_points);
-    for (int i = 0; i < n_points; ++i) run.sample_t[i] = t_end * i / (n_points - 1);
-    run.sample_t.back() = t_end;
+    Run run{m, opts, res, m.n_state, t_end, std::move(sample_t), 0, 0.0, Vec(y0.begin(), y0.end()), Clock::now(), 0};
 
     if ((res.status = run.emit(run.y)) != SimStatus::Ok) return res;
     if (m.n_state == 0) {
@@ -457,6 +623,13 @@ SimResult simulate(const Model& m, std::span<const double> y0, double t_end, int
             res.used_stiff = true;
             res.status = run_rosenbrock(run);
             break;
+        case Method::CVODE:
+#ifdef NETEVOLVE_HAVE_CVODE
+            res.status = run_cvode(run);
+            break;
+#else
+            throw std::invalid_argument("simulate: this build has no CVODE solver (configure with NETEVOLVE_WITH_CVODE=ON)");
+#endif
         case Method::Auto: {
             const SimStatus st = run_rk45(run, /*stop_on_stiff=*/true);
             if (st == SimStatus::Stiff || st == SimStatus::StepBudget || st == SimStatus::StepTooSmall) {
@@ -471,5 +644,7 @@ SimResult simulate(const Model& m, std::span<const double> y0, double t_end, int
     }
     return res;
 }
+
+}  // namespace
 
 }  // namespace ne

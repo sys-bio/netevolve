@@ -1,0 +1,17 @@
+// Numerically pathological oscillator: S0 and S1 dip to about 1e-22 every
+// cycle (SciPy Radau, rtol 1e-10). CVODE scores it 1.0 without a concentration
+// floor; RK45 and LSODA fail on it. From trial 19 of
+// 'evolve --seed 1 --numtrials 50' with solver = cvode.
+const X0, X1;
+J0: S0 + X1 -> S1; k0*S0*X1;
+J1: X0 + X1 -> S2 + X1; k1*X0*X1;
+J2: S1 + X0 -> S3 + X1; k2*S1*X0;
+J3: X1 + X1 -> S2 + S3; k3*X1*X1;
+J4: S1 -> X1; k4*S1;
+J5: S1 -> S2; k5*S1;
+J6: S1 + S3 -> S0 + S1; k6*S1*S3;
+J7: S0 -> S1; k7*S0;
+J8: S3 -> S3 + S3; k8*S3;
+k0 = 0.32376040298439934; k1 = 16.779273188859953; k2 = 0.06449534206165998; k3 = 0.07446417727088525; k4 = 6.001351394745588; k5 = 16.324172073441787; k6 = 12.103020727518002; k7 = 100; k8 = 0.27390388525610904;
+S0 = 1; S1 = 1; S2 = 1; S3 = 1;
+X0 = 1; X1 = 1;

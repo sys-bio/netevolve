@@ -6,6 +6,109 @@
 
 Remote: https://github.com/zyrrron/netevolve (private), branch `main`.
 
+## After M7: multiple trials and the tight-tolerance re-check (2026-11-20)
+
+Both were added at the PI's request and go beyond SPEC.
+
+**`evolve --numtrials N`** (`run_trials_command`, `trial_seeds` in `src/evolve.cpp`):
+- Runs N independent trials in one command.
+- `--seed` seeds one master `mt19937_64` once, and trial i uses its i-th output as its seed.
+- Trial i writes to `<out>/trial<i>/`, and its `run.cfg` holds its own seed. Rerunning a trial alone with that seed gives byte-identical output (tested).
+- `<out>/summary.csv` has one row per trial.
+- Without the flag, `evolve` is unchanged: seed 1 still stops at generation 72 after 13,160 evaluations.
+
+**Why the re-check was needed:**
+- **Test batch:** a 50-trial batch, `--seed 1 --numtrials 50` (default config, before the re-check), gave 37/50 trials with fitness ≥ 0.95 and 17/50 passing the long-run check.
+- **Re-scoring at tight tolerance:** the 37 winners were re-scored at rtol 1e-10 / atol 1e-14 with three solver setups: Auto, Rosenbrock only and RK45 only.
+  - 28 were robust.
+  - 2 were integrator artifacts. Trial 1 dropped from 1.0 to 0.33. Trial 18 dropped from 1.0 to 0 and went to negative concentrations; it had also **passed** the long-run check.
+  - 3 had inflated scores, 1.0 dropping to 0.8.
+  - The remaining 4 differed only in the Rosenbrock-only solve or in amplitude.
+- **CVODE (Tellurium 2.2.11.1, libRoadRunner 2.9.1):** it failed to integrate 8 of the 9 flagged networks, at default and/or tight settings, mostly with `CV_CONV_FAILURE` (h down to 1e-156). It reproduced all 4 robust controls, matching NetEvolve's amplitudes to 4–5 significant figures. Conclusion: the flagged models are numerically bad, and the default tolerance let evolution select them.
+
+**Tight-tolerance re-check** (`oscillation_fitness` in `src/fitness.cpp`; config keys `recheck_threshold = 0.9`, `recheck_rtol = 1e-10`, `recheck_atol = 1e-14`):
+- **Rule:** a network scoring ≥ the threshold is re-simulated at the tight tolerances, and its fitness is the lower of the two scores. A failed re-check simulation scores 0. A threshold > 1 turns the re-check off.
+- **Where it applies:** evolution, `prune` and the acceptance test. The `fitness` command prints the re-check line.
+- **Fixture:** `examples/integrator_artifact.ant` (trial 18 above) scores 1 at the default tolerance and 0 at the tight one.
+- **Tests:** 3 new doctest cases plus config validation checks. No existing test was changed.
+
+**Results with the re-check:**
+- **Acceptance test:** **4 of 5 passed**, up from 3 of 5. Seed 2 now evolves a different network, which passes (213.6 → 213.6).
+- **Same 50-trial batch:**
+  - 37/50 trials had fitness ≥ 0.95, and 16/50 passed the long-run check.
+  - Run time was 257.5 s, against 240.6 s before (+7%).
+  - All 37 winners keep their fitness at tight tolerance with both Auto and RK45.
+  - The yield before the re-check, counting only winners that also passed the tolerance check, was 14/50.
+
+**CVODE is now the default solver** (PI decision, 2026-11-20):
+- **Why:** RK45 alone is not viable. In a 50-trial batch with `solver = rk45` and `max_steps = 500000`, trials ran 20–85× slower than `auto` (projected 2.5–3 h against 4 min). The batch was stopped after 3 trials, which gave the same results as `auto`. Stiff candidates make RK45 take hundreds of thousands of steps.
+- **Implementation** (`run_cvode` in `src/integrator.cpp`):
+  - SUNDIALS 5.7.0, CVODE BDF with the analytic Jacobian, `SUNDenseMatrix` and `SUNLinSol_Dense`.
+  - `CV_ONE_STEP` with a stop time at t_end, so the max_conc, min_conc and non-finite guards, the step budget and the wall-clock limit apply after every step, as for the in-house solvers.
+  - Samples come from `CVodeGetDky`. A non-finite RHS returns a recoverable error.
+  - CVODE errors map to `StepBudget` (`CV_TOO_MUCH_WORK`), `NonFinite` (RHS failures) or `StepTooSmall` (others).
+- **Build:**
+  - `NETEVOLVE_WITH_CVODE` is ON by default. If SUNDIALS isn't found, configuration stops with instructions; `-DNETEVOLVE_WITH_CVODE=OFF` builds without it.
+  - Config key `solver = cvode | auto | rk45 | rosenbrock`. The default is `cvode`, or `auto` in builds without CVODE, so `default.cfg` leaves it commented. Also `max_steps`.
+  - `--version` lists the solvers available.
+  - On the PI's machine: `-DSUNDIALS_DIR=D:/buildroadrunner/libroadrunner-deps/install-Release/lib/cmake/sundials`. That install is static and `/MD`, matching our Release build.
+- **Tests:**
+  - `tests/test_cvode.cpp`: decay against the exact solution (7e-9), Robertson against the SciPy reference, Brusselator against RK45 (4e-6), guards, determinism, and the artifact scoring 0.
+  - Without CVODE, it checks that requesting CVODE fails cleanly.
+  - Test changes: (1) `integrator_artifact.ant` test now pins `solver = auto`, because the artifact fools the in-house solvers and CVODE rejects it even at the default tolerance; (2) my own `solver` validation test used "cvode" as an unknown name and now uses "lsoda"; (3) the default-solver check expects CVODE when available.
+  - Results: 79/79 doctest cases with CVODE and 74/74 without; CTest 12/12 in both.
+- **Acceptance with CVODE:** 4 of 5 passed. Seed 5 fails the long-run check (0.43 → 0, a damped transient).
+- **Same 50-trial batch with CVODE:**
+  - 110 s against 258 s for `auto`; 2.46 M evaluations, about 22,400 per second against about 8,000.
+  - 33/50 trials had fitness ≥ 0.95, and 15/50 passed the long-run check (16 for `auto`; no real difference at n = 50).
+  - 32 of the 33 winners were confirmed by the in-house tight solvers. The exception, trial 19, scores 1.0 with CVODE and with Rosenbrock, 0.92 with SciPy Radau, and fails with RK45 (negative) and with LSODA. Its S0 and S1 drop to about 1e-22 every cycle: numerically pathological and physically meaningless. It fails the long-run check anyway.
+  - Proposed, not done: an optional concentration floor (e.g. reject oscillators whose species dip below 1e-12).
+
+**Concentration floor** (`osc_conc_floor = 1e-12`, PI request; `oscillation_report` in `src/fitness.cpp`):
+- **Rule:** if a species with at least one peak-trough pair in the scored window drops below the floor there, the network's fitness is 0.
+- **Why the whole network:** in deep_dip.ant, S3 oscillates cleanly *because* S0 and S1 crash, so a per-species rule would not have rejected it.
+- **What doesn't trigger it:** species that decay without oscillating.
+- **Fixtures and tests:**
+  - `examples/deep_dip.ant` is CVODE trial 19. Its minimum is about 1e-22 (Radau); with CVODE at the default tolerance, S0 reaches -3.2e-10.
+  - Tests: synthetic signals, the config key, the Brusselator unaffected, deep_dip rejected with CVODE (and passing with the floor off), and integrator_artifact.ant rejected by the floor alone.
+  - The earlier re-check test now sets `osc_conc_floor = 0` to isolate the re-check, because the floor catches that network first.
+- **Acceptance** (CVODE + floor): **3 of 5** passed, down from 4 of 5. Seeds 2 and 5 stall at fitness 0.2 and 0.9.
+- **50-trial batch** (CVODE + floor, master seed 1): 109 s. 33/50 trials had fitness ≥ 0.95 (same as without the floor), and **13/50** passed the long-run check, against 15/50 without the floor. At n = 50 the binomial SD is about 3.2, so this isn't a clear loss, but the floor may block some evolutionary paths that pass through deep-dip networks. Worth watching with more trials.
+
+**Time-series objective** (PI request; `parse_target`, `evaluate_target`, `network_fitness` in `src/fitness.cpp`, and `simulate_at` in `src/integrator.cpp`):
+- **Config:** `objective = oscillation | timeseries` and `target_file`.
+  - The target file has two columns, time and concentration, with whitespace or comma separators, `#` comments and one optional header line. Times must be strictly increasing.
+  - A relative `target_file` resolves against the config file's directory and is stored absolute, so `run.cfg` works from the output directory.
+- **Score:** simulate from t = 0 and sample at exactly the target times (`simulate_at`). Per species, NRMSE = RMS error / mean |target|, and score = 1 / (1 + NRMSE). The network fitness is the best species.
+  - The re-check applies, and so do `prune` and `--numtrials`.
+  - The long-run check is n/a for this objective. The trial summary shows "n/a", and the batch line reports how many trials reached target_fitness.
+- **Ambiguities resolved simply:**
+  - The file names no species, so the best match is used, as in the oscillation fitness.
+  - Only the values at the target times are scored; no extremum is required there.
+  - Initial conditions are those of the network (all 1 for evolved networks).
+- **Example:** `examples/target_peaks.txt` holds the Brusselator S0 troughs and peaks on t ∈ [0, 40], and `examples/timeseries.cfg` uses it. The Brusselator scores 0.99997 against it (S0), and damped.ant scores 0.52.
+- **Tests:** `tests/test_timeseries.cpp` covers file formats and errors, `simulate_at` for all in-house solvers, the exact NRMSE formula, the Brusselator target, config validation and relative paths, and evolve plus `--numtrials` end to end.
+- **10 trials, master seed 1, default population and generations:** 60 s, and **0/10 reached 0.99**.
+  - Best: trial 6 at 0.980 (NRMSE 0.020). Its S3 matches every target to within about 0.07, a genuine oscillator found from scratch.
+  - Trials 2 and 9 reached 0.91 and 0.88.
+  - The other 7 are stuck at about 0.54–0.57 (NRMSE ≈ 0.83). That is the score of a slowly drifting line near the target's mean, a broad local optimum.
+  - Every trial was still improving at generation ~500 and was at or near r_max = 12 reactions. More generations, a larger population or a higher r_max would probably help.
+- **Test counts:** 90/90 doctest cases with CVODE and 84/84 without; CTest 12/12 in both.
+
+**SUNDIALS is downloaded automatically** (PI request; `CMakeLists.txt`):
+- **Lookup order:** `SUNDIALS_DIR` / `find_package`; otherwise FetchContent of the official v5.7.0 release tarball with a pinned SHA-256 (`NETEVOLVE_FETCH_SUNDIALS=ON` by default); otherwise a configure error with instructions.
+- **What gets built:** only CVODE, static, with no examples. SUNDIALS is resolved *before* `add_compile_options(/W4 /WX ...)`, so its sources aren't built with our warnings-as-errors.
+- **Short folders:** source and build go in `<build>/sd-src` and `<build>/sd`, because the default `_deps/sundials-build` plus MSBuild's .tlog paths exceeded 260 characters (FTK1011) in a deep build directory.
+- **Measured:** a fresh build directory takes 15 s to configure (including the download) and 34 s to build. All 12 CTest tests and all 90 doctest cases pass.
+- **Identical results:** seed 3 gives byte-identical `log.csv`, `best_final.ant` and `best_final.csv` with the downloaded SUNDIALS and with the PI's installed SUNDIALS 5.7.0.
+- **Offline:** `-DFETCHCONTENT_SOURCE_DIR_SUNDIALS=<extracted folder>` uses a local source and downloads nothing (verified).
+- `.gitignore` now ignores `build_*/` as well as `build/`.
+
+**Open issue: RODAS3 at tight tolerances** (it affects only `solver = auto` / `rosenbrock` now).
+- In the re-check batch, Rosenbrock alone scores 0 on 5 winners (trials 16, 17, 21, 22, 39) where Auto and RK45 agree on about 1.0. It gives negative concentrations on 16 and 39 and exceeds the step budget on 21.
+- On trial 21 (first batch), CVODE agreed with Auto/RK45. So this looks like a weakness of the Rosenbrock solver (no positivity handling?), not of the networks.
+- Auto switches to Rosenbrock on stiffness, so this could wrongly reject stiff genuine oscillators. It needs investigating.
+
 ## M7: End-to-end oscillator evolution and validation
 
 Done:

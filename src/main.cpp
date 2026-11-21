@@ -2,6 +2,7 @@
 #include <charconv>
 #include <chrono>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -21,7 +22,7 @@ namespace {
 
 void print_usage(std::ostream& os) {
     os << "usage:\n"
-          "  netevolve evolve   --config FILE [--seed N] [--out DIR]\n"
+          "  netevolve evolve   --config FILE [--seed N] [--out DIR] [--numtrials N]\n"
           "  netevolve simulate --model FILE.ant [--t-end T] [--points N] [--csv OUT.csv]\n"
           "  netevolve fitness  --model FILE.ant [--config FILE]\n"
           "  netevolve prune    --model FILE.ant [--config FILE] [--out FILE.ant]\n"
@@ -68,6 +69,10 @@ void write_file(const std::string& path, const std::string& content) {
 }
 
 void print_long_run(std::ostream& os, const ne::Network& net, const ne::FitnessParams& fp) {
+    if (fp.objective != ne::Objective::Oscillation) {
+        os << "long-run check: n/a (time-series objective)\n";
+        return;
+    }
     const ne::LongRunReport lr = ne::long_run_check(net, fp);
     os << "long-run check (to " << 5 * fp.t_end << "): ";
     if (lr.status != ne::SimStatus::Ok) {
@@ -91,8 +96,7 @@ int cmd_simulate(int argc, char** argv) {
     if (!(t_end > 0)) throw UsageError("--t-end must be > 0");
     if (points < 2) throw UsageError("--points must be >= 2");
 
-    ne::SolverOptions opts;
-    opts.max_conc = defaults.max_conc;
+    const ne::SolverOptions opts = ne::fitness_params(defaults).solver;  // the default solver and limits
     const ne::SimResult r = ne::simulate(ne::make_model(net), net.init, t_end, points, opts);
     const std::string csv = ne::simulation_csv(r, net);
     if (f.count("--csv")) write_file(f.at("--csv"), csv);
@@ -113,19 +117,52 @@ int cmd_fitness(int argc, char** argv) {
     if (f.count("--config")) cfg = ne::load_config_file(f.at("--config"));
     ne::validate_config(cfg);
 
-    const ne::FitnessReport rep = ne::evaluate_oscillation(net, ne::fitness_params(cfg));
-    std::cout << "status: " << ne::to_string(rep.status) << "\n";
-    for (std::size_t s = 0; s < rep.species.size(); ++s) {
-        const ne::SignalScore& sc = rep.species[s];
-        std::cout << ne::species_name(net, static_cast<int>(s)) << ": pairs " << sc.n_pairs << ", damping "
-                  << sc.damping << ", score " << sc.score << "\n";
+    const ne::FitnessParams fp = ne::fitness_params(cfg);
+    ne::FitnessParams tight = fp;
+    tight.solver = fp.recheck_solver;
+    auto print_recheck = [&](const char* status, double score) {
+        std::cout << "re-check (rtol " << fp.recheck_solver.rtol << ", atol " << fp.recheck_solver.atol
+                  << "): status " << status << ", score " << score << "\n";
+    };
+
+    if (fp.objective == ne::Objective::TimeSeries) {
+        const ne::TargetReport rep = ne::evaluate_target(net, fp);
+        std::cout << "objective: time series, " << fp.target->t.size() << " target points to t = "
+                  << fp.target->t.back() << "\n";
+        std::cout << "status: " << ne::to_string(rep.status) << "\n";
+        for (std::size_t s = 0; s < rep.nrmse.size(); ++s)
+            std::cout << ne::species_name(net, static_cast<int>(s)) << ": NRMSE " << rep.nrmse[s] << ", score "
+                      << 1.0 / (1.0 + rep.nrmse[s]) << (static_cast<int>(s) == rep.species ? "  (best match)" : "")
+                      << "\n";
+        if (rep.fitness >= fp.recheck_threshold) {
+            const ne::TargetReport rc = ne::evaluate_target(net, tight);
+            print_recheck(ne::to_string(rc.status), rc.fitness);
+        }
+    } else {
+        const ne::FitnessReport rep = ne::evaluate_oscillation(net, fp);
+        std::cout << "status: " << ne::to_string(rep.status) << "\n";
+        for (std::size_t s = 0; s < rep.species.size(); ++s) {
+            const ne::SignalScore& sc = rep.species[s];
+            std::cout << ne::species_name(net, static_cast<int>(s)) << ": pairs " << sc.n_pairs << ", damping "
+                      << sc.damping << ", score " << sc.score << "\n";
+        }
+        if (rep.floor_species >= 0)
+            std::cout << "concentration floor: " << ne::species_name(net, rep.floor_species) << " oscillates and dips to "
+                      << rep.floor_min << " (< " << fp.osc.conc_floor << "), so the fitness is 0\n";
+        if (rep.fitness >= fp.recheck_threshold) {
+            const ne::FitnessReport rc = ne::evaluate_oscillation(net, tight);
+            print_recheck(ne::to_string(rc.status), rc.fitness);
+            if (rc.floor_species >= 0)
+                std::cout << "  re-check: " << ne::species_name(net, rc.floor_species) << " dips to " << rc.floor_min
+                          << " (< " << fp.osc.conc_floor << ")\n";
+        }
     }
-    std::cout << "fitness " << rep.fitness << "\n";
+    std::cout << "fitness " << ne::network_fitness(net, fp) << "\n";
     return 0;
 }
 
 int cmd_evolve(int argc, char** argv) {
-    const auto f = parse_flags(argc, argv, {"--config", "--seed", "--out"});
+    const auto f = parse_flags(argc, argv, {"--config", "--seed", "--out", "--numtrials"});
     ne::Config cfg = ne::load_config_file(require_flag(f, "--config"));
     if (f.count("--seed")) cfg.seed = flag_number<std::uint64_t>("--seed", f.at("--seed"));
     if (f.count("--out")) {
@@ -133,6 +170,26 @@ int cmd_evolve(int argc, char** argv) {
         cfg.output_dir = f.at("--out");
     }
     ne::validate_config(cfg);
+
+    if (f.count("--numtrials")) {
+        const int n = flag_number<int>("--numtrials", f.at("--numtrials"));
+        if (n < 1) throw UsageError("--numtrials must be >= 1");
+        std::cout << "netevolve evolve: " << n << " trials, master seed " << cfg.seed << ", population "
+                  << cfg.population << ", generations " << cfg.generations << ", threads "
+                  << ne::resolve_threads(cfg.threads) << ", output " << cfg.output_dir << "\n";
+        const auto start = std::chrono::steady_clock::now();
+        const auto trials = ne::run_trials_command(cfg, n, &std::cout);
+        const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        int passed = 0, reached = 0;
+        for (const auto& t : trials) {
+            passed += t.long_run_passed ? 1 : 0;
+            reached += t.result.best_fitness >= cfg.target_fitness ? 1 : 0;
+        }
+        std::cout << n << " trials in " << secs << " s; " << reached << " of " << n << " reached target_fitness";
+        if (cfg.objective == "oscillation") std::cout << ", " << passed << " of " << n << " passed the long-run check";
+        std::cout << "; summary in " << (std::filesystem::path(cfg.output_dir) / "summary.csv").string() << "\n";
+        return 0;
+    }
     std::cout << "netevolve evolve: seed " << cfg.seed << ", population " << cfg.population << ", generations "
               << cfg.generations << ", threads " << ne::resolve_threads(cfg.threads) << ", output "
               << cfg.output_dir << "\n";
@@ -156,7 +213,7 @@ int cmd_prune(int argc, char** argv) {
     const ne::FitnessParams fp = ne::fitness_params(cfg);
 
     const ne::PruneResult pr =
-        ne::prune(net, [&](const ne::Network& n) { return ne::oscillation_fitness(n, fp); }, cfg.r_min);
+        ne::prune(net, [&](const ne::Network& n) { return ne::network_fitness(n, fp); }, cfg.r_min);
     char header[128];
     std::snprintf(header, sizeof header, "netevolve: pruned, fitness %.6g (original %.6g)", pr.fitness,
                   pr.original_fitness);
@@ -183,7 +240,9 @@ int main(int argc, char** argv) {
     const std::string_view cmd = argv[1];
     try {
         if (cmd == "--version") {
-            std::cout << "netevolve " << NETEVOLVE_VERSION << "\n";
+            std::cout << "netevolve " << NETEVOLVE_VERSION
+                      << (ne::cvode_available() ? " (solvers: cvode [default], auto, rk45, rosenbrock)\n"
+                                                : " (solvers: auto [default], rk45, rosenbrock; built without CVODE)\n");
             return 0;
         }
         if (cmd == "--help" || cmd == "-h") {

@@ -1,12 +1,14 @@
 // M5: mutation operators, selection with elitism, the generation loop and
 // the evolve command outputs.
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include "config.hpp"
 #include "doctest/doctest.h"
@@ -348,4 +350,56 @@ TEST_CASE("evolve command writes the documented output files") {
     CHECK(fs::exists(d / "best_gen0000.ant"));
     CHECK(read_file(d / "best_final.csv").rfind("time,S0,S1,S2,S3\n", 0) == 0);
     fs::remove_all(d);
+}
+
+TEST_CASE("--numtrials: trial seeds come from one master generator seeded once") {
+    const auto a = trial_seeds(42, 5);
+    REQUIRE(a.size() == 5);
+    CHECK(a == trial_seeds(42, 5));             // same master seed, same trial seeds
+    CHECK(trial_seeds(42, 3) == std::vector<std::uint64_t>(a.begin(), a.begin() + 3));  // prefix-stable
+    CHECK(a != trial_seeds(43, 5));             // different master seed, different trials
+    for (std::size_t i = 0; i < a.size(); ++i)  // every trial gets its own seed
+        for (std::size_t j = i + 1; j < a.size(); ++j) CHECK(a[i] != a[j]);
+}
+
+TEST_CASE("--numtrials: each trial writes its own outputs and summary.csv has one row per trial") {
+    const fs::path d = fresh_dir("trials");
+    const Config cfg = small_config(d.string());
+    const auto trials = run_trials_command(cfg, 3);
+    REQUIRE(trials.size() == 3);
+    const auto seeds = trial_seeds(cfg.seed, 3);
+
+    std::istringstream summary(read_file(d / "summary.csv"));
+    std::string line;
+    std::getline(summary, line);
+    CHECK(line == "trial,seed,best_fitness,best_generation,reactions,evaluations,long_run");
+    int rows = 0;
+    while (std::getline(summary, line)) {
+        ++rows;
+        CHECK(line.rfind(std::to_string(rows) + "," + std::to_string(seeds[rows - 1]) + ",", 0) == 0);
+    }
+    CHECK(rows == 3);
+
+    for (int i = 1; i <= 3; ++i) {
+        const fs::path td = d / ("trial" + std::to_string(i));
+        const TrialSummary& t = trials[static_cast<std::size_t>(i - 1)];
+        CHECK(t.trial == i);
+        CHECK(t.seed == seeds[static_cast<std::size_t>(i - 1)]);
+        // run.cfg holds the trial's own seed, so the trial can be rerun alone.
+        CHECK(load_config_file((td / "run.cfg").string()).seed == t.seed);
+        CHECK(load_antimony_file((td / "best_final.ant").string()) == t.result.best);
+        CHECK(fs::exists(td / "log.csv"));
+        CHECK(fs::exists(td / "best_final.csv"));
+    }
+
+    // Rerunning one trial alone with its recorded seed reproduces it exactly.
+    Config solo = small_config(fresh_dir("trials_solo").string());
+    solo.seed = trials[1].seed;
+    run_evolve_command(solo);
+    CHECK(read_file(fs::path(solo.output_dir) / "log.csv") == read_file(d / "trial2" / "log.csv"));
+    CHECK(read_file(fs::path(solo.output_dir) / "best_final.ant") == read_file(d / "trial2" / "best_final.ant"));
+
+    CHECK_THROWS(run_trials_command(cfg, 0));
+    fs::remove_all(d);
+    fs::remove_all(solo.output_dir);
 }

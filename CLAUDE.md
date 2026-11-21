@@ -9,7 +9,7 @@ An evolutionary generator of mass-action reaction networks, written in C++20. Th
 - Never weaken, skip or delete a test to make it pass. If a test looks wrong, stop and explain why to the human.
 - Keep `PROGRESS.md` current: the milestone, what was done, test status, and open issues.
 - Commit at the end of each milestone as `M<n>: <title>`. Smaller commits are fine.
-- Use only the C++20 standard library plus vendored doctest. Ask before adding anything else.
+- Use only the C++20 standard library plus vendored doctest, and SUNDIALS 5.x (CVODE), which the PI approved on 2026-11-20 as the default solver. Ask before adding anything else.
 - Determinism: draw everything from one seeded `std::mt19937_64`. The same seed and config must give bit-identical results.
 - Keep it simple: plain structs and free functions, nothing the spec doesn't ask for.
 - When the spec is ambiguous, pick the simplest reading and note it in `PROGRESS.md`.

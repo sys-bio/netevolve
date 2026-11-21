@@ -1,7 +1,11 @@
 #include "fitness.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
+#include <fstream>
+#include <sstream>
+#include <stdexcept>
 
 #include "model.hpp"
 
@@ -78,6 +82,21 @@ FitnessParams fitness_params(const Config& c) {
     p.osc.n_target = c.n_target;
     p.osc.min_rel_amplitude = c.min_rel_amplitude;
     p.solver.max_conc = c.max_conc;
+    p.solver.max_steps = c.max_steps;
+    p.solver.method = c.solver == "rk45"         ? Method::RK45
+                      : c.solver == "rosenbrock" ? Method::Rosenbrock
+                      : c.solver == "cvode"      ? Method::CVODE
+                                                 : Method::Auto;
+    p.recheck_solver.method = p.solver.method;
+    p.recheck_threshold = c.recheck_threshold;
+    p.recheck_solver.rtol = c.recheck_rtol;
+    p.recheck_solver.atol = c.recheck_atol;
+    p.recheck_solver.max_conc = c.max_conc;
+    p.osc.conc_floor = c.osc_conc_floor;
+    if (c.objective == "timeseries") {
+        p.objective = Objective::TimeSeries;
+        p.target = std::make_shared<const TimeSeriesTarget>(load_target_file(c.target_file));
+    }
     return p;
 }
 
@@ -86,13 +105,23 @@ FitnessReport oscillation_report(const SimResult& sim, const OscillationParams& 
     r.status = sim.status;
     if (!sim.ok()) return r;
     const int F = sim.n_state, n = sim.n_samples();
+    const int start = static_cast<int>(p.transient_fraction * static_cast<double>(n));  // as in signal_score
     std::vector<double> traj(n);
     for (int sp = 0; sp < F; ++sp) {
         for (int i = 0; i < n; ++i) traj[i] = sim.at(i, sp);
         const SignalScore s = signal_score(traj, p);
         r.species.push_back(s);
         r.fitness = std::max(r.fitness, s.score);
+        // Concentration floor: an oscillating species must stay above it.
+        if (p.conc_floor > 0 && s.n_pairs > 0 && start < n) {
+            const double lo = *std::min_element(traj.begin() + start, traj.end());
+            if (lo < p.conc_floor && r.floor_species < 0) {
+                r.floor_species = sp;
+                r.floor_min = lo;
+            }
+        }
     }
+    if (r.floor_species >= 0) r.fitness = 0.0;
     return r;
 }
 
@@ -103,7 +132,125 @@ FitnessReport evaluate_oscillation(const Network& net, const FitnessParams& p) {
 }
 
 double oscillation_fitness(const Network& net, const FitnessParams& p) {
-    return evaluate_oscillation(net, p).fitness;
+    const double f = evaluate_oscillation(net, p).fitness;
+    if (f < p.recheck_threshold) return f;
+    FitnessParams tight = p;
+    tight.solver = p.recheck_solver;
+    return std::min(f, evaluate_oscillation(net, tight).fitness);
+}
+
+// ---------------------------------------------------------------------------
+// Time-series objective
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Splits a data line on whitespace and commas.
+std::vector<std::string> fields(const std::string& line) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (char ch : line) {
+        if (ch == ',' || ch == ' ' || ch == '\t' || ch == '\r') {
+            if (!cur.empty()) out.push_back(cur);
+            cur.clear();
+        } else {
+            cur += ch;
+        }
+    }
+    if (!cur.empty()) out.push_back(cur);
+    return out;
+}
+
+bool to_double(const std::string& s, double& v) {
+    const auto res = std::from_chars(s.data(), s.data() + s.size(), v);
+    return res.ec == std::errc() && res.ptr == s.data() + s.size() && std::isfinite(v);
+}
+
+}  // namespace
+
+TimeSeriesTarget parse_target(const std::string& text) {
+    TimeSeriesTarget tg;
+    std::istringstream in(text);
+    std::string raw;
+    int line = 0;
+    bool header_allowed = true;
+    while (std::getline(in, raw)) {
+        ++line;
+        const auto hash = raw.find('#');
+        const std::vector<std::string> f = fields(hash == std::string::npos ? raw : raw.substr(0, hash));
+        if (f.empty()) continue;
+        double t = 0, v = 0;
+        const bool numeric = f.size() == 2 && to_double(f[0], t) && to_double(f[1], v);
+        if (!numeric) {
+            if (header_allowed && !(f.size() >= 1 && to_double(f[0], t))) {  // one text header line
+                header_allowed = false;
+                continue;
+            }
+            throw std::runtime_error("target line " + std::to_string(line) +
+                                     ": expected two numbers, time and concentration");
+        }
+        header_allowed = false;
+        if (t < 0) throw std::runtime_error("target line " + std::to_string(line) + ": time must be >= 0");
+        if (!tg.t.empty() && !(t > tg.t.back()))
+            throw std::runtime_error("target line " + std::to_string(line) + ": times must be strictly increasing");
+        tg.t.push_back(t);
+        tg.value.push_back(v);
+    }
+    if (tg.t.empty()) throw std::runtime_error("target has no data points");
+    if (!(tg.t.back() > 0)) throw std::runtime_error("target: the last time must be > 0");
+    return tg;
+}
+
+TimeSeriesTarget load_target_file(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) throw std::runtime_error("cannot open target file '" + path + "'");
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    try {
+        return parse_target(ss.str());
+    } catch (const std::runtime_error& e) {
+        throw std::runtime_error(path + ": " + e.what());
+    }
+}
+
+TargetReport evaluate_target(const Network& net, const FitnessParams& p) {
+    if (!p.target) throw std::invalid_argument("evaluate_target: no target loaded");
+    const TimeSeriesTarget& tg = *p.target;
+    TargetReport r;
+    const SimResult sim = simulate_at(make_model(net), net.init, tg.t, p.solver);
+    r.status = sim.status;
+    if (!sim.ok()) return r;
+
+    const int n = static_cast<int>(tg.t.size());
+    double scale = 0.0;
+    for (double v : tg.value) scale += std::abs(v);
+    scale /= n;
+    if (!(scale > 0)) scale = 1.0;  // all-zero target: plain RMS error
+
+    for (int sp = 0; sp < sim.n_state; ++sp) {
+        double sse = 0.0;
+        for (int i = 0; i < n; ++i) {
+            const double d = sim.at(i, sp) - tg.value[static_cast<std::size_t>(i)];
+            sse += d * d;
+        }
+        const double e = std::sqrt(sse / n) / scale;
+        r.nrmse.push_back(e);
+        const double score = 1.0 / (1.0 + e);
+        if (score > r.fitness) {
+            r.fitness = score;
+            r.species = sp;
+        }
+    }
+    return r;
+}
+
+double network_fitness(const Network& net, const FitnessParams& p) {
+    if (p.objective == Objective::Oscillation) return oscillation_fitness(net, p);
+    const double f = evaluate_target(net, p).fitness;
+    if (f < p.recheck_threshold) return f;
+    FitnessParams tight = p;
+    tight.solver = p.recheck_solver;
+    return std::min(f, evaluate_target(net, tight).fitness);
 }
 
 namespace {

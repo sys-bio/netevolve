@@ -2,6 +2,7 @@
 
 #include <charconv>
 #include <cmath>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 
@@ -62,6 +63,14 @@ void set_config_value(Config& c, const std::string& key, const std::string& valu
     else if (key == "min_rel_amplitude") D(c.min_rel_amplitude);
     else if (key == "max_conc") D(c.max_conc);
     else if (key == "target_fitness") D(c.target_fitness);
+    else if (key == "recheck_threshold") D(c.recheck_threshold);
+    else if (key == "recheck_rtol") D(c.recheck_rtol);
+    else if (key == "recheck_atol") D(c.recheck_atol);
+    else if (key == "solver") c.solver = value;
+    else if (key == "max_steps") c.max_steps = parse_num<long>(key, value);
+    else if (key == "osc_conc_floor") D(c.osc_conc_floor);
+    else if (key == "objective") c.objective = value;
+    else if (key == "target_file") c.target_file = value;
     else if (key == "output_dir") {
         if (value.empty()) throw ConfigError("output_dir must not be empty");
         c.output_dir = value;
@@ -97,11 +106,19 @@ Config load_config_file(const std::string& path) {
     if (!in) throw ConfigError("cannot open config file '" + path + "'");
     std::ostringstream ss;
     ss << in.rdbuf();
+    Config c;
     try {
-        return parse_config(ss.str());
+        c = parse_config(ss.str());
     } catch (const ConfigError& e) {
         throw ConfigError(path + ": " + e.what());
     }
+    // A relative target_file is relative to this config file's directory.
+    if (!c.target_file.empty()) {
+        const std::filesystem::path tf(c.target_file);
+        if (tf.is_relative())
+            c.target_file = (std::filesystem::absolute(path).parent_path() / tf).lexically_normal().string();
+    }
+    return c;
 }
 
 void validate_config(const Config& c) {
@@ -126,6 +143,17 @@ void validate_config(const Config& c) {
     require(c.n_target >= 1, "n_target must be >= 1");
     require(c.min_rel_amplitude >= 0, "min_rel_amplitude must be >= 0");
     require(c.max_conc > 0, "max_conc must be > 0");
+    require(c.recheck_threshold >= 0, "recheck_threshold must be >= 0");
+    require(c.recheck_rtol > 0 && c.recheck_atol > 0, "recheck_rtol and recheck_atol must be > 0");
+    require(c.solver == "auto" || c.solver == "rk45" || c.solver == "rosenbrock" || c.solver == "cvode",
+            "solver must be auto, rk45, rosenbrock or cvode");
+#ifndef NETEVOLVE_HAVE_CVODE
+    require(c.solver != "cvode", "solver = cvode, but this build has no CVODE (configured with NETEVOLVE_WITH_CVODE=OFF)");
+#endif
+    require(c.max_steps >= 1, "max_steps must be >= 1");
+    require(c.osc_conc_floor >= 0, "osc_conc_floor must be >= 0");
+    require(c.objective == "oscillation" || c.objective == "timeseries", "objective must be oscillation or timeseries");
+    require(c.objective != "timeseries" || !c.target_file.empty(), "objective = timeseries needs target_file");
     require(c.threads >= 0, "threads must be >= 0");
 }
 
@@ -155,6 +183,14 @@ std::string write_config(const Config& c) {
        << "min_rel_amplitude = " << fmt(c.min_rel_amplitude) << "\n"
        << "max_conc = " << fmt(c.max_conc) << "\n"
        << "target_fitness = " << fmt(c.target_fitness) << "\n"
+       << "recheck_threshold = " << fmt(c.recheck_threshold) << "\n"
+       << "recheck_rtol = " << fmt(c.recheck_rtol) << "\n"
+       << "recheck_atol = " << fmt(c.recheck_atol) << "\n"
+       << "solver = " << c.solver << "\n"
+       << "max_steps = " << c.max_steps << "\n"
+       << "osc_conc_floor = " << fmt(c.osc_conc_floor) << "\n"
+       << "objective = " << c.objective << "\n"
+       << "target_file = " << c.target_file << "\n"
        << "output_dir = " << c.output_dir << "\n"
        << "threads = " << c.threads << "\n";
     return os.str();

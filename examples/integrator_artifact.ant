@@ -1,0 +1,16 @@
+// Integrator artifact: scores 1.0 at the default tolerance (rtol 1e-6) but 0
+// at rtol 1e-10 / atol 1e-14; CVODE (libRoadRunner) fails on it at both.
+// Evolved in trial 18 of 'evolve --seed 1 --numtrials 50' (default config).
+const X0, X1;
+J0: S1 -> S1 + S1; k0*S1;
+J1: S0 + S1 -> S3 + X1; k1*S0*S1;
+J2: S0 -> S0 + S1; k2*S0;
+J3: S3 + X1 -> S3 + X0; k3*S3*X1;
+J4: S3 + X0 -> X0; k4*S3*X0;
+J5: S1 + X1 -> S2 + S2; k5*S1*X1;
+J6: S1 + S3 -> S0 + S0; k6*S1*S3;
+J7: S0 + X1 -> S2; k7*S0*X1;
+J8: S3 + X1 -> S2; k8*S3*X1;
+k0 = 0.8326604596908777; k1 = 69.70551298714595; k2 = 0.015958283763123235; k3 = 80.96079697861717; k4 = 0.05769112260373069; k5 = 0.011754935631590378; k6 = 0.013092397941665198; k7 = 1.2566649867760595; k8 = 27.743852567113294;
+S0 = 1; S1 = 1; S2 = 1; S3 = 1;
+X0 = 1; X1 = 1;

@@ -31,6 +31,7 @@ std::string name(Method m) {
         case Method::Auto: return "Auto";
         case Method::RK45: return "RK45";
         case Method::Rosenbrock: return "Rosenbrock";
+        case Method::CVODE: return "CVODE";
     }
     return "?";
 }
