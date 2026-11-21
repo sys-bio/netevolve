@@ -38,4 +38,4 @@ The CLI is in `src/`, the doctest tests in `tests/`, example models and configs 
 
 ## Workspace note
 
-This repo sits in `D:\zyrr\Research\UW\RoadRunnerProject2026\netevolve`, next to an unrelated libroadrunner workspace (`../roadrunner`, `../build`, etc.). Don't touch anything outside `netevolve/`.
+The canonical repo is https://github.com/sys-bio/netevolve (current branch `cvode-timeseries`). Its location on disk varies by machine, so don't assume a path. Keep it short, because Windows' 260-character limit can break the SUNDIALS build. Don't touch anything outside the repo folder.

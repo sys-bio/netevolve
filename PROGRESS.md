@@ -4,7 +4,7 @@
 
 **M7 (end-to-end oscillator evolution and validation) is complete. All milestones M0–M7 are done.** One step remains for the human: loading the results into Tellurium manually (SPEC M7). See "Manual Tellurium step" below.
 
-Remote: https://github.com/zyrrron/netevolve (private), branch `main`.
+Remote: https://github.com/sys-bio/netevolve. Current work is on branch `cvode-timeseries`, which replaces the earlier private copy (`zyrrron/netevolve`).
 
 ## After M7: multiple trials and the tight-tolerance re-check (2026-11-20)
 
